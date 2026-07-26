@@ -1,0 +1,46 @@
+{
+  "version": 3,
+  "workflow": "planner-implementer-reviewer",
+  "taskWorkspace": "docs/tasks/example-module",
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "title": "Add the first module capability",
+      "status": "ready",
+      "path": "TASK-001-first-capability",
+      "dependsOn": [],
+      "contract": {
+        "acceptanceCriteria": [
+          {
+            "id": "AC-001",
+            "description": "The capability has observable, tested behavior"
+          }
+        ],
+        "allowedPaths": [
+          "src/**",
+          "tests/**"
+        ],
+        "nonGoals": [
+          "Unrelated refactors"
+        ]
+      },
+      "qualityGates": [
+        {
+          "name": "unit tests",
+          "command": ["python3", "-m", "unittest", "discover", "-s", "tests"],
+          "timeoutSeconds": 300
+        }
+      ],
+      "attempts": {
+        "planning": 0,
+        "implementation": 0,
+        "review": 0
+      },
+      "limits": {
+        "planning": 2,
+        "implementation": 5,
+        "review": 3
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["PASS", "FAIL", "NEEDS_REPLAN"]
+    },
+    "summary": {"type": "string", "minLength": 1},
+    "acceptanceCriteria": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "pattern": "^AC-"},
+          "status": {"type": "string", "enum": ["PASS", "FAIL"]},
+          "evidence": {"type": "string", "minLength": 1}
+        },
+        "required": ["id", "status", "evidence"]
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "pattern": "^REV-"},
+          "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+          "file": {"type": "string"},
+          "description": {"type": "string", "minLength": 1},
+          "expectedBehavior": {"type": "string", "minLength": 1},
+          "status": {"type": "string", "enum": ["open", "resolved"]}
+        },
+        "required": ["id", "severity", "file", "description", "expectedBehavior", "status"]
+      }
+    }
+  },
+  "required": ["status", "summary", "acceptanceCriteria", "findings"]
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["IMPLEMENTATION_COMPLETE", "IN_PROGRESS", "BLOCKED", "VERIFICATION_FAILED"]
+    },
+    "summary": {"type": "string", "minLength": 1},
+    "changedFiles": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "verification": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "exitCode": {"type": "integer"},
+          "summary": {"type": "string"}
+        },
+        "required": ["command", "exitCode", "summary"]
+      }
+    },
+    "acceptanceCriteria": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "pattern": "^AC-"},
+          "status": {"type": "string", "enum": ["PASS", "FAIL"]},
+          "evidence": {"type": "string", "minLength": 1}
+        },
+        "required": ["id", "status", "evidence"]
+      }
+    }
+  },
+  "required": ["status", "summary", "changedFiles", "verification", "acceptanceCriteria"]
+}

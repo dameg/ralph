@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["READY", "BLOCKED", "NEEDS_CLARIFICATION"]
+    },
+    "summary": {"type": "string", "minLength": 1},
+    "filesPlanned": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "verificationCommands": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "minItems": 1,
+        "items": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "required": ["status", "summary", "filesPlanned", "verificationCommands"]
+}
