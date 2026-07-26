@@ -43,6 +43,20 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "command"):
             Manifest.load(repo.config.manifest_path, repo.root)
 
+    def test_task_can_reference_its_own_prd(self):
+        repo = Repo()
+        self.addCleanup(repo.close)
+        prd = repo.root / "docs" / "second-prd.md"
+        prd.write_text("# Second PRD\n", encoding="utf-8")
+        import json
+
+        path = repo.config.manifest_path
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["tasks"][0]["prd"] = "docs/second-prd.md"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        manifest = Manifest.load(path, repo.root)
+        self.assertEqual(manifest.get("TASK-001").raw["prd"], "docs/second-prd.md")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,10 +3,36 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from .errors import ConfigError
 from .util import ensure_command
+
+
+ROLES = ("planner", "implementer", "reviewer")
+REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
+
+
+@dataclass(frozen=True)
+class RoleModelConfig:
+    model: str
+    reasoning_effort: str
+    escalate_after_attempts: Optional[int] = None
+    escalation_model: Optional[str] = None
+    escalation_reasoning_effort: Optional[str] = None
+
+    def select(self, attempt: int) -> tuple[str, str, bool]:
+        escalated = (
+            self.escalate_after_attempts is not None
+            and attempt > self.escalate_after_attempts
+        )
+        if escalated:
+            return (
+                self.escalation_model or self.model,
+                self.escalation_reasoning_effort or self.reasoning_effort,
+                True,
+            )
+        return self.model, self.reasoning_effort, False
 
 
 @dataclass(frozen=True)
@@ -16,6 +42,15 @@ class AgentConfig:
     network_access: bool = False
     timeout_seconds: int = 1800
     model: Optional[str] = None
+    roles: Mapping[str, RoleModelConfig] = field(default_factory=dict)
+
+    def model_for(self, role: str, attempt: int) -> tuple[str, str, bool]:
+        profile = self.roles.get(role)
+        if profile:
+            return profile.select(attempt)
+        if self.model:
+            return self.model, "medium", False
+        raise ConfigError(f"No model configuration found for role {role}")
 
 
 @dataclass(frozen=True)
@@ -88,6 +123,7 @@ class Config:
         model = agent_raw.get("model")
         if model is not None and (not isinstance(model, str) or not model):
             raise ConfigError("agent.model must be a non-empty string")
+        roles = _load_role_models(agent_raw.get("roles"), model)
 
         return cls(
             root=root,
@@ -103,6 +139,7 @@ class Config:
                 network_access=bool(agent_raw.get("networkAccess", False)),
                 timeout_seconds=timeout,
                 model=model,
+                roles=roles,
             ),
             git=GitConfig(
                 branch_prefix=branch_prefix,
@@ -122,7 +159,95 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "sandbox": "workspace-write",
         "networkAccess": False,
         "timeoutSeconds": 1800,
+        "roles": {
+            "planner": {
+                "model": "gpt-5.6-terra",
+                "reasoningEffort": "medium",
+                "escalateAfterAttempts": 1,
+                "escalationModel": "gpt-5.6-sol",
+                "escalationReasoningEffort": "high",
+            },
+            "implementer": {
+                "model": "gpt-5.6-terra",
+                "reasoningEffort": "medium",
+                "escalateAfterAttempts": 2,
+                "escalationModel": "gpt-5.6-sol",
+                "escalationReasoningEffort": "high",
+            },
+            "reviewer": {
+                "model": "gpt-5.6-terra",
+                "reasoningEffort": "high",
+                "escalateAfterAttempts": 1,
+                "escalationModel": "gpt-5.6-sol",
+                "escalationReasoningEffort": "high",
+            },
+        },
     },
     "git": {"branchPrefix": "ralph/", "keepBranches": False},
     "ui": {"color": "auto"},
 }
+
+
+def _load_role_models(value: Any, global_model: Optional[str]) -> Dict[str, RoleModelConfig]:
+    defaults = DEFAULT_CONFIG["agent"]["roles"]
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise ConfigError("agent.roles must be a JSON object")
+    unknown = sorted(set(value) - set(ROLES))
+    if unknown:
+        raise ConfigError(f"agent.roles contains unknown roles: {', '.join(unknown)}")
+
+    result: Dict[str, RoleModelConfig] = {}
+    for role in ROLES:
+        if global_model and role not in value:
+            result[role] = RoleModelConfig(
+                model=global_model,
+                reasoning_effort="medium",
+            )
+            continue
+        raw = value.get(role, {})
+        if not isinstance(raw, dict):
+            raise ConfigError(f"agent.roles.{role} must be a JSON object")
+        default = defaults[role]
+        model = raw.get("model", global_model or default["model"])
+        effort = raw.get("reasoningEffort", default["reasoningEffort"])
+        escalate_after = raw.get(
+            "escalateAfterAttempts", default.get("escalateAfterAttempts")
+        )
+        escalation_model = raw.get("escalationModel", default.get("escalationModel"))
+        escalation_effort = raw.get(
+            "escalationReasoningEffort", default.get("escalationReasoningEffort")
+        )
+        if not isinstance(model, str) or not model:
+            raise ConfigError(f"agent.roles.{role}.model must be a non-empty string")
+        if effort not in REASONING_EFFORTS:
+            raise ConfigError(
+                f"agent.roles.{role}.reasoningEffort must be one of: "
+                + ", ".join(sorted(REASONING_EFFORTS))
+            )
+        if escalate_after is not None and (
+            not isinstance(escalate_after, int) or escalate_after < 1
+        ):
+            raise ConfigError(
+                f"agent.roles.{role}.escalateAfterAttempts must be a positive integer"
+            )
+        if escalation_model is not None and (
+            not isinstance(escalation_model, str) or not escalation_model
+        ):
+            raise ConfigError(
+                f"agent.roles.{role}.escalationModel must be a non-empty string"
+            )
+        if escalation_effort is not None and escalation_effort not in REASONING_EFFORTS:
+            raise ConfigError(
+                f"agent.roles.{role}.escalationReasoningEffort must be one of: "
+                + ", ".join(sorted(REASONING_EFFORTS))
+            )
+        result[role] = RoleModelConfig(
+            model=model,
+            reasoning_effort=effort,
+            escalate_after_attempts=escalate_after,
+            escalation_model=escalation_model,
+            escalation_reasoning_effort=escalation_effort,
+        )
+    return result

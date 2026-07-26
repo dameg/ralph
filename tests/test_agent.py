@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from ralph_loop.agent import validate_role_result
+from ralph_loop.agent import CodexAgent, validate_role_result
 from ralph_loop.errors import AgentError
 from ralph_loop.manifest import Task
 
@@ -46,6 +46,15 @@ class AgentResultTests(unittest.TestCase):
                 },
                 self.task,
             )
+
+    def test_prompt_uses_task_specific_prd(self):
+        from tests.helpers import Repo
+
+        repo = Repo()
+        self.addCleanup(repo.close)
+        self.task.raw["prd"] = "docs/prds/billing.md"
+        prompt = CodexAgent(repo.config)._prompt("planner", self.task, "")
+        self.assertIn("docs/prds/billing.md, the PRD assigned to this task", prompt)
 
 
 if __name__ == "__main__":

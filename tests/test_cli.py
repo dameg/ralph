@@ -42,6 +42,15 @@ class CliTests(unittest.TestCase):
             self.assertTrue(
                 (root / ".ralph" / "schemas" / "reviewer-result.schema.json").is_file()
             )
+            import json
+
+            config = json.loads(
+                (root / ".ralph" / "config.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                config["agent"]["roles"]["planner"]["model"],
+                "gpt-5.6-terra",
+            )
             status = subprocess.run(
                 [sys.executable, "-m", "ralph_loop", "status", "--color", "never"],
                 cwd=str(root),
@@ -53,6 +62,33 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertIn("The manifest contains no tasks", status.stdout)
+
+    def test_default_role_models_escalate_after_retries(self):
+        from tests.helpers import Repo
+
+        repo = Repo()
+        self.addCleanup(repo.close)
+        agent = repo.config.agent
+        self.assertEqual(
+            agent.model_for("planner", 1),
+            ("gpt-5.6-terra", "medium", False),
+        )
+        self.assertEqual(
+            agent.model_for("planner", 2),
+            ("gpt-5.6-sol", "high", True),
+        )
+        self.assertEqual(
+            agent.model_for("implementer", 2),
+            ("gpt-5.6-terra", "medium", False),
+        )
+        self.assertEqual(
+            agent.model_for("implementer", 3),
+            ("gpt-5.6-sol", "high", True),
+        )
+        self.assertEqual(
+            agent.model_for("reviewer", 1),
+            ("gpt-5.6-terra", "high", False),
+        )
 
 
 if __name__ == "__main__":
