@@ -380,6 +380,18 @@ class Orchestrator:
         result_dir = session.path.parent / "results"
         result_path = result_dir / f"{sequence:03d}-{role}.json"
         log_path = result_dir / f"{sequence:03d}-{role}.log"
+        stage = {
+            "planner": "planning",
+            "implementer": "implementation",
+            "reviewer": "review",
+        }[role]
+        model, reasoning_effort, escalated = self.config.agent.model_for(
+            role, task.attempts(stage)
+        )
+        escalation_note = " · escalated" if escalated else ""
+        self.ui.detail(
+            f"Model: {model} · reasoning: {reasoning_effort}{escalation_note}"
+        )
         before = self.git.file_snapshot(worktree)
         caught: Optional[Exception] = None
         result: Optional[Dict[str, Any]] = None
@@ -421,6 +433,7 @@ class Orchestrator:
             "**/AGENTS.md",
             self.manifest_relative,
             relative_path(self.config.root, self.config.prd_path),
+            task.raw.get("prd", relative_path(self.config.root, self.config.prd_path)),
             f"{task.task_dir}/task.md",
         ]
         if role != "planner":
@@ -435,6 +448,9 @@ class Orchestrator:
             taskId=task.id,
             role=role,
             sequence=sequence,
+            model=model,
+            reasoningEffort=reasoning_effort,
+            escalated=escalated,
             changedPaths=sorted(changed),
             resultPath=str(result_path),
             logPath=str(log_path),

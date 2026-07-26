@@ -146,6 +146,17 @@ class Manifest:
                 task_path.relative_to(workspace_path)
             except ValueError as error:
                 raise ConfigError(f"{task_id}.path escapes taskWorkspace") from error
+            task_prd = raw.get("prd")
+            if task_prd is not None:
+                if not isinstance(task_prd, str) or not task_prd:
+                    raise ConfigError(f"{task_id}.prd must be a non-empty path")
+                prd_path = (repo_root / task_prd).resolve()
+                try:
+                    prd_path.relative_to(repo_root.resolve())
+                except ValueError as error:
+                    raise ConfigError(f"{task_id}.prd must be inside the repository") from error
+                if not prd_path.is_file():
+                    raise ConfigError(f"{task_id}.prd not found: {prd_path}")
             try:
                 dependencies = ensure_string_list(raw.get("dependsOn", []), f"{task_id}.dependsOn")
             except ValueError as error:

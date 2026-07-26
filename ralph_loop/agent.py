@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Mapping, Optional, Protocol
 from .config import Config
 from .errors import AgentError
 from .manifest import Task
-from .util import stable_env
+from .util import relative_path, stable_env
 
 
 ROLE_STATUSES = {
@@ -58,6 +58,14 @@ class CodexAgent:
 
         result_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        stage = {
+            "planner": "planning",
+            "implementer": "implementation",
+            "reviewer": "review",
+        }[role]
+        model, reasoning_effort, _ = self.config.agent.model_for(
+            role, task.attempts(stage)
+        )
         command = [
             *self.config.agent.command,
             "--ephemeral",
@@ -74,9 +82,11 @@ class CodexAgent:
             str(result_path),
             "--color",
             "never",
+            "--model",
+            model,
+            "--config",
+            f'model_reasoning_effort="{reasoning_effort}"',
         ]
-        if self.config.agent.model:
-            command.extend(["--model", self.config.agent.model])
         command.append("-")
         prompt = self._prompt(role, task, context)
         try:
@@ -126,6 +136,8 @@ class CodexAgent:
             ),
             "reviewer": "You may modify only review.md in the task directory. Do not fix the code.",
         }
+        default_prd = relative_path(self.config.root, self.config.prd_path)
+        prd_path = task.raw.get("prd", default_prd)
         return f"""Follow all applicable AGENTS.md files.
 
 You are the {role} for exactly one task: {task.id} — {task.title}.
@@ -133,7 +145,7 @@ You are the {role} for exactly one task: {task.id} — {task.title}.
 Read, in this order:
 1. .ralph/prompts/{role}.md (the complete role contract),
 2. {task.task_dir}/task.md,
-3. the PRD configured in .ralph/config.json,
+3. {prd_path}, the PRD assigned to this task,
 4. repository instructions and relevant source files,
 5. existing plan.md, progress.md, and review.md when relevant.
 

@@ -1,5 +1,7 @@
 # Ralph Loop v3 🤖
 
+[![CI](https://github.com/dameg/ralph/actions/workflows/ci.yml/badge.svg)](https://github.com/dameg/ralph/actions/workflows/ci.yml)
+
 A deterministic Codex orchestrator for implementing complete modules from a
 PRD. The model performs the creative work, while the orchestrator controls state
 transitions, file scope, validation, and finalization.
@@ -62,6 +64,10 @@ Every task must define:
 - separate attempt limits for planning, implementation, and review;
 - a task directory containing `task.md`.
 
+An optional task-level `prd` path overrides the default PRD from
+`.ralph/config.json`. This lets one manifest coordinate tasks generated from
+multiple PRDs.
+
 Statuses form an explicit state machine:
 
 ```text
@@ -73,6 +79,93 @@ ready → planning → planned → implementing → in_review → completed
 The `blocked` and `failed` states stop the session without merging partial code.
 The isolated branch and worktree remain available for inspection, and their
 locations are shown in the terminal.
+
+## Role-aware model routing
+
+Ralph uses an adaptive model profile for each role. Initial attempts use Terra
+to keep routine work efficient. Repeated attempts automatically escalate to Sol
+with higher reasoning effort:
+
+| Role | Initial profile | Escalation |
+|---|---|---|
+| Planner | `gpt-5.6-terra`, medium | Sol/high after 1 failed attempt |
+| Implementer | `gpt-5.6-terra`, medium | Sol/high after 2 failed attempts |
+| Reviewer | `gpt-5.6-terra`, high | Sol/high after 1 failed attempt |
+
+The defaults work even for configuration files created by earlier Ralph
+versions. Override them under `agent.roles` in `.ralph/config.json`:
+
+```json
+{
+  "agent": {
+    "roles": {
+      "planner": {
+        "model": "gpt-5.6-terra",
+        "reasoningEffort": "medium",
+        "escalateAfterAttempts": 1,
+        "escalationModel": "gpt-5.6-sol",
+        "escalationReasoningEffort": "high"
+      }
+    }
+  }
+}
+```
+
+Use `ralph run --verbose` to see the selected model, reasoning effort, and
+whether the current attempt was escalated. The same data is written to the
+runtime journal.
+
+## Multiple PRDs in one queue
+
+Keep all PRDs and their tasks in one versioned manifest when they belong to the
+same repository:
+
+```text
+docs/
+├── prds/
+│   ├── 01-authentication.md
+│   ├── 02-billing.md
+│   └── 03-reporting.md
+└── tasks/product/
+    ├── manifest.json
+    ├── auth/AUTH-001-.../task.md
+    ├── billing/BILL-001-.../task.md
+    └── reporting/REPORT-001-.../task.md
+```
+
+Each task points to its source PRD:
+
+```json
+{
+  "id": "BILL-001",
+  "prd": "docs/prds/02-billing.md",
+  "path": "billing/BILL-001-create-invoice-model",
+  "dependsOn": ["AUTH-003"]
+}
+```
+
+Ralph selects the first executable task in manifest order and checks every
+dependency before starting it. To enforce strict module order, make the first
+task of the next PRD depend on the final integration task of the previous PRD:
+
+```text
+AUTH-001 → AUTH-002 → AUTH-003
+                         ↓
+BILL-001 → BILL-002 → BILL-003
+                         ↓
+REPORT-001 → REPORT-002
+```
+
+After committing the PRDs, task descriptions, and manifest, one command runs
+the complete queue:
+
+```bash
+ralph run
+```
+
+If a task becomes blocked, Ralph does not silently skip into a later module when
+that module depends on it. Resolve the blocker in the preserved worktree, then
+run `ralph run` again.
 
 ## Determinism and safety
 
