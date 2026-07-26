@@ -64,7 +64,7 @@ class GateRunner:
                 results.append(gate_result)
                 if exit_code != 0:
                     raise GateError(
-                        f"Bramka „{name}” nie przeszła (kod {exit_code}); log: {log_path}"
+                        f"Quality gate '{name}' failed with exit code {exit_code}; log: {log_path}"
                     )
         return results
 

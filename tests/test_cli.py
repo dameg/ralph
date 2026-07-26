@@ -52,7 +52,7 @@ class CliTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(status.returncode, 0, status.stderr)
-            self.assertIn("Manifest nie zawiera zadań", status.stdout)
+            self.assertIn("The manifest contains no tasks", status.stdout)
 
 
 if __name__ == "__main__":

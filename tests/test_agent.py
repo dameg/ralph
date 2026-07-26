@@ -14,7 +14,7 @@ class AgentResultTests(unittest.TestCase):
         self.task = Task(task_payload(), "docs/tasks/module")
 
     def test_reviewer_pass_requires_all_acceptance_evidence(self):
-        with self.assertRaisesRegex(AgentError, "brak"):
+        with self.assertRaisesRegex(AgentError, "missing"):
             validate_role_result(
                 "reviewer",
                 {
@@ -27,7 +27,7 @@ class AgentResultTests(unittest.TestCase):
             )
 
     def test_reviewer_pass_rejects_open_finding(self):
-        with self.assertRaisesRegex(AgentError, "otwartymi"):
+        with self.assertRaisesRegex(AgentError, "open"):
             validate_role_result(
                 "reviewer",
                 {

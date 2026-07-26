@@ -26,7 +26,7 @@ class GateTests(unittest.TestCase):
             ]
             task = Task(raw, "docs/tasks/module")
             logs = root / "logs"
-            with self.assertRaisesRegex(GateError, "kod 7"):
+            with self.assertRaisesRegex(GateError, "exit code 7"):
                 GateRunner(NullUI()).run_all(task, root, logs)
             self.assertIn("exit_code=7", next(logs.iterdir()).read_text(encoding="utf-8"))
 

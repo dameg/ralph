@@ -32,7 +32,7 @@ class ManifestTests(unittest.TestCase):
         data = json.loads(path.read_text(encoding="utf-8"))
         data["tasks"].append(second)
         path.write_text(json.dumps(data), encoding="utf-8")
-        with self.assertRaisesRegex(ConfigError, "cykl"):
+        with self.assertRaisesRegex(ConfigError, "cycle"):
             Manifest.load(path, repo.root)
 
     def test_shell_string_gate_is_rejected(self):

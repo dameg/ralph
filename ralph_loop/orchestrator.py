@@ -54,7 +54,7 @@ class Orchestrator:
 
             self.ui.iteration(iteration, maximum, task.id, task.title)
             self.ui.detail(
-                f"Stan: {task.status} · próby P/I/R: "
+                f"State: {task.status} · P/I/R attempts: "
                 f"{task.attempts('planning')}/{task.attempts('implementation')}/{task.attempts('review')}"
             )
             try:
@@ -75,7 +75,7 @@ class Orchestrator:
         if task is None:
             return self._finish_without_task(manifest, session)
         self.journal.record("run_limit_reached", maxIterations=maximum)
-        self.ui.warning(f"Osiągnięto limit {maximum} iteracji; stan można bezpiecznie wznowić.")
+        self.ui.warning(f"Reached the {maximum}-iteration limit; the state can be resumed safely.")
         if manifest:
             self._show_summary(manifest)
         return 2
@@ -85,7 +85,7 @@ class Orchestrator:
         self.git.ensure_head()
         self.git.ensure_identity()
         if not self.config.prd_path.is_file():
-            raise ConfigError(f"Brak PRD: {self.config.prd_path}")
+            raise ConfigError(f"PRD not found: {self.config.prd_path}")
         self.git.exclude_runtime(self.runtime_relative)
         active = self._active_sessions()
         if not active:
@@ -93,7 +93,7 @@ class Orchestrator:
             Manifest.load(self.config.manifest_path, self.config.root)
         elif len(active) > 1:
             ids = ", ".join(session.data.get("taskId", "?") for session in active)
-            raise GitError(f"Wykryto więcej niż jedną aktywną sesję: {ids}")
+            raise GitError(f"More than one active session was detected: {ids}")
         self._recover_commit(active[0] if active else None)
 
     def _active_sessions(self) -> List[Session]:
@@ -131,7 +131,7 @@ class Orchestrator:
                 )
                 return
             raise GitError(
-                f"Brak worktree aktywnej sesji {session.data['taskId']}: {worktree}"
+                f"Worktree for active session {session.data['taskId']} not found: {worktree}"
             )
         worktree_head = self.git.head(worktree)
         commit_sha = session.data.get("commitSha")
@@ -164,7 +164,7 @@ class Orchestrator:
                 self._cleanup_session(session)
                 return
             self.ui.info(
-                f"Odzyskuję potwierdzony commit dla {session.data['taskId']}", "♻️ "
+                f"Recovering the confirmed commit for {session.data['taskId']}", "♻️ "
             )
             self._merge_and_cleanup(session)
 
@@ -187,10 +187,10 @@ class Orchestrator:
         branch = f"{self.config.git.branch_prefix}{safe_id}"
         worktree = self.config.runtime_path / "worktrees" / safe_id
         if worktree.exists():
-            raise GitError(f"Docelowy worktree już istnieje: {worktree}")
+            raise GitError(f"Target worktree already exists: {worktree}")
         if self.git.branch_exists(branch):
-            raise GitError(f"Gałąź sesji już istnieje bez aktywnego stanu: {branch}")
-        with self.ui.step("🌿", f"Tworzę izolowaną gałąź {branch}"):
+            raise GitError(f"Session branch exists without active state: {branch}")
+        with self.ui.step("🌿", f"Creating isolated branch {branch}"):
             self.git.add_worktree(worktree, branch, base_sha)
         session = Session.create(
             self.config.runtime_path,
@@ -221,7 +221,7 @@ class Orchestrator:
         elif task.status == "in_review":
             self._reviewer(session, manifest, task)
         else:
-            raise ConfigError(f"Nie można obsłużyć {task.id} ze stanu {task.status}")
+            raise ConfigError(f"Cannot process {task.id} from state {task.status}")
 
     def _planner(self, session: Session, manifest: Manifest, task: Task) -> None:
         if not self._begin_attempt(task, "planning", manifest):
@@ -239,15 +239,15 @@ class Orchestrator:
         if status == "READY":
             task.status = "planned"
             task.raw.pop("blockReason", None)
-            self.ui.success("Plan gotowy i zwalidowany")
+            self.ui.success("Plan is ready and validated")
         elif status == "BLOCKED":
             task.status = "blocked"
             task.raw["blockReason"] = "planner"
-            self.ui.warning("Planner zgłosił blokadę")
+            self.ui.warning("Planner reported a blocker")
         else:
             task.status = "blocked"
             task.raw["blockReason"] = "clarification"
-            self.ui.warning("Planner potrzebuje doprecyzowania")
+            self.ui.warning("Planner needs clarification")
         manifest.save()
         self.journal.record("planner_finished", taskId=task.id, status=status)
 
@@ -269,10 +269,10 @@ class Orchestrator:
         if status == "BLOCKED":
             task.status = "blocked"
             task.raw["blockReason"] = "implementer"
-            self.ui.warning("Implementer zgłosił blokadę")
+            self.ui.warning("Implementer reported a blocker")
         elif status in {"IN_PROGRESS", "VERIFICATION_FAILED"}:
             task.status = "needs_changes"
-            self.ui.warning("Implementacja wymaga kolejnego przebiegu")
+            self.ui.warning("Implementation requires another pass")
         else:
             try:
                 self._run_gates(session, task)
@@ -283,7 +283,7 @@ class Orchestrator:
             else:
                 task.status = "in_review"
                 task.raw.pop("lastFailure", None)
-                self.ui.success("Implementacja przeszła wszystkie bramki")
+                self.ui.success("Implementation passed all quality gates")
         manifest.save()
         self.journal.record("implementer_finished", taskId=task.id, status=status)
 
@@ -295,7 +295,7 @@ class Orchestrator:
             task.raw["lastFailure"] = str(error)
             manifest.save()
             self.journal.record("review_precheck_failed", taskId=task.id, error=str(error))
-            self.ui.warning("Kod zmienił się od ostatniej weryfikacji; wraca do implementera")
+            self.ui.warning("Code changed after the previous verification; returning to the implementer")
             return
         if not self._begin_attempt(task, "review", manifest):
             return
@@ -320,18 +320,18 @@ class Orchestrator:
             except GateError as error:
                 task.status = "needs_changes"
                 task.raw["lastFailure"] = str(error)
-                self.ui.warning("Finalna weryfikacja nie przeszła; zadanie wraca do implementera")
+                self.ui.warning("Final verification failed; returning the task to the implementer")
             else:
                 task.status = "completed"
                 task.raw.pop("blockReason", None)
                 task.raw.pop("lastFailure", None)
-                self.ui.success("Niezależny review zakończony wynikiem PASS")
+                self.ui.success("Independent review completed with PASS")
         elif status == "FAIL":
             task.status = "needs_changes"
-            self.ui.warning("Reviewer znalazł blokujące problemy")
+            self.ui.warning("Reviewer found blocking issues")
         else:
             task.status = "needs_replan"
-            self.ui.warning("Reviewer skierował zadanie do ponownego planowania")
+            self.ui.warning("Reviewer sent the task back for replanning")
         manifest.save()
         self.journal.record("reviewer_finished", taskId=task.id, status=status)
 
@@ -341,7 +341,7 @@ class Orchestrator:
             task.raw["blockReason"] = f"{stage}_attempts_exhausted"
             manifest.save()
             self.journal.record("attempts_exhausted", taskId=task.id, stage=stage)
-            self.ui.error(f"{task.id}: wyczerpano limit prób etapu {stage}")
+            self.ui.error(f"{task.id}: exhausted the attempt limit for stage {stage}")
             return False
         task.increment(stage)
         manifest.save()
@@ -411,7 +411,7 @@ class Orchestrator:
         )
         if workflow_violations:
             raise ScopeError(
-                f"Rola {role} zmieniła artefakty innego etapu/zadania: "
+                f"Role {role} modified artifacts belonging to another stage or task: "
                 + ", ".join(workflow_violations)
             )
         protected = [
@@ -442,7 +442,7 @@ class Orchestrator:
         if caught:
             if isinstance(caught, AgentError):
                 raise caught
-            raise AgentError(f"Rola {role} zakończyła się błędem: {caught}") from caught
+            raise AgentError(f"Role {role} failed: {caught}") from caught
         assert result is not None
         return result
 
@@ -461,12 +461,12 @@ class Orchestrator:
         changed = self.git.changed_since(before, after)
         if changed:
             raise ScopeError(
-                "Quality gate zmodyfikował worktree: " + ", ".join(sorted(changed))
+                "Quality gate modified the worktree: " + ", ".join(sorted(changed))
             )
         if caught:
             if isinstance(caught, GateError):
                 raise caught
-            raise GateError(f"Nie można wykonać quality gates: {caught}") from caught
+            raise GateError(f"Cannot run quality gates: {caught}") from caught
         self.journal.record(
             "quality_gates_passed",
             taskId=task.id,
@@ -485,7 +485,7 @@ class Orchestrator:
     def _require_artifact(self, session: Session, task: Task, name: str) -> None:
         path = Path(session.data["worktree"]) / task.task_dir / name
         if not path.is_file() or not path.read_text(encoding="utf-8").strip():
-            raise AgentError(f"Rola nie utworzyła wymaganego pliku {path}")
+            raise AgentError(f"Role did not create the required file {path}")
 
     def _complete(self, session: Session, manifest: Manifest, task: Task) -> None:
         worktree = Path(session.data["worktree"])
@@ -499,19 +499,19 @@ class Orchestrator:
         ]
         changed = self.git.changed_paths(worktree)
         self.git.assert_scope(changed, [*task.allowed_paths, *administrative], "finalizer")
-        with self.ui.step("📦", "Tworzę atomowy commit zadania"):
+        with self.ui.step("📦", "Creating an atomic task commit"):
             commit_sha = self.git.commit_all(worktree, f"{task.id}: {task.title}")
             session.data["commitSha"] = commit_sha
             session.save()
             self.journal.record("commit_confirmed", taskId=task.id, commitSha=commit_sha)
         self._merge_and_cleanup(session)
-        self.ui.success(f"{task.id} ukończone · {commit_sha[:8]}")
+        self.ui.success(f"{task.id} completed · {commit_sha[:8]}")
 
     def _merge_and_cleanup(self, session: Session) -> None:
         commit_sha = session.data.get("commitSha")
         if not commit_sha:
-            raise GitError("Nie można scalić sesji bez potwierdzonego commita")
-        with self.ui.step("🔗", f"Fast-forward do {session.data['baseBranch']}"):
+            raise GitError("Cannot merge a session without a confirmed commit")
+        with self.ui.step("🔗", f"Fast-forwarding {session.data['baseBranch']}"):
             merged_sha = self.git.fast_forward(
                 session.data["baseSha"],
                 session.data["branch"],
@@ -519,7 +519,7 @@ class Orchestrator:
             )
             if merged_sha != commit_sha:
                 raise GitError(
-                    f"Po scaleniu HEAD={merged_sha}, oczekiwano potwierdzonego {commit_sha}"
+                    f"HEAD after merge is {merged_sha}; expected confirmed commit {commit_sha}"
                 )
             session.data["merged"] = True
             session.save()
@@ -542,26 +542,26 @@ class Orchestrator:
         self, manifest: Optional[Manifest], session: Optional[Session] = None
     ) -> int:
         if manifest is None:
-            raise ConfigError("Nie można odczytać stanu zadań")
+            raise ConfigError("Cannot read task state")
         self._show_summary(manifest)
         counts = manifest.counts()
         total = len(manifest.tasks)
         completed = counts.get("completed", 0)
         if total == 0:
-            self.ui.warning("Manifest nie zawiera jeszcze zadań.")
+            self.ui.warning("The manifest does not contain any tasks yet.")
             return 0
         if completed == total:
             self.journal.record("run_completed", completed=completed, total=total)
-            self.ui.success("Wszystkie zadania są ukończone 🎉")
+            self.ui.success("All tasks are complete 🎉")
             return 0
         if session:
             task = manifest.get(session.data["taskId"])
             self.ui.warning(
-                f"{task.id} zatrzymane w stanie {task.status}; gałąź: {session.data['branch']}"
+                f"{task.id} stopped in state {task.status}; branch: {session.data['branch']}"
             )
-            self.ui.info(f"Worktree do inspekcji: {session.data['worktree']}", "📁")
+            self.ui.info(f"Worktree for inspection: {session.data['worktree']}", "📁")
         else:
-            self.ui.warning("Brak wykonywalnych zadań; sprawdź zależności i blokady.")
+            self.ui.warning("No executable tasks remain; check dependencies and blockers.")
         return 3
 
     def _show_summary(self, manifest: Manifest) -> None:

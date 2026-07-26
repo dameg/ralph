@@ -54,7 +54,7 @@ class CodexAgent:
         task_file = root / task.task_dir / "task.md"
         for required in (prompt_path, schema_path, task_file):
             if not required.is_file():
-                raise AgentError(f"Brak pliku wymaganego przez rolę {role}: {required}")
+                raise AgentError(f"Required file for role {role} not found: {required}")
 
         result_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,21 +94,21 @@ class CodexAgent:
                 )
         except subprocess.TimeoutExpired as error:
             raise AgentError(
-                f"Rola {role} przekroczyła limit {self.config.agent.timeout_seconds}s; log: {log_path}"
+                f"Role {role} exceeded the {self.config.agent.timeout_seconds}s timeout; log: {log_path}"
             ) from error
         except OSError as error:
-            raise AgentError(f"Nie można uruchomić agenta: {error}") from error
+            raise AgentError(f"Cannot start the agent: {error}") from error
         if result.returncode != 0:
             raise AgentError(
-                f"Rola {role} zakończyła się kodem {result.returncode}; log: {log_path}"
+                f"Role {role} exited with code {result.returncode}; log: {log_path}"
             )
         if not result_path.is_file():
-            raise AgentError(f"Rola {role} nie zwróciła wyniku JSON; log: {log_path}")
+            raise AgentError(f"Role {role} did not return a JSON result; log: {log_path}")
         try:
             with result_path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
         except (OSError, json.JSONDecodeError) as error:
-            raise AgentError(f"Nieprawidłowy JSON roli {role}: {error}; log: {log_path}") from error
+            raise AgentError(f"Invalid JSON from role {role}: {error}; log: {log_path}") from error
         validate_role_result(role, payload, task)
         return payload
 
@@ -119,12 +119,12 @@ class CodexAgent:
             "reviewer": "review.md",
         }
         restrictions = {
-            "planner": "Wolno Ci zmienić wyłącznie plan.md w katalogu zadania.",
+            "planner": "You may modify only plan.md in the task directory.",
             "implementer": (
-                "Wolno Ci zmienić progress.md oraz ścieżki dozwolone w kontrakcie zadania. "
-                "Nie zmieniaj task.md, plan.md, review.md, manifestu ani references/."
+                "You may modify progress.md and the paths allowed by the task contract. "
+                "Do not modify task.md, plan.md, review.md, the manifest, or references/."
             ),
-            "reviewer": "Wolno Ci zmienić wyłącznie review.md w katalogu zadania. Nie poprawiaj kodu.",
+            "reviewer": "You may modify only review.md in the task directory. Do not fix the code.",
         }
         return f"""Follow all applicable AGENTS.md files.
 
@@ -156,58 +156,58 @@ Additional recovery context:
 
 def validate_role_result(role: str, payload: Any, task: Task) -> None:
     if role not in ROLE_STATUSES:
-        raise AgentError(f"Nieznana rola: {role}")
+        raise AgentError(f"Unknown role: {role}")
     if not isinstance(payload, dict):
-        raise AgentError(f"Wynik roli {role} musi być obiektem JSON")
+        raise AgentError(f"The {role} result must be a JSON object")
     status = payload.get("status")
     if status not in ROLE_STATUSES[role]:
         expected = ", ".join(sorted(ROLE_STATUSES[role]))
-        raise AgentError(f"Rola {role} zwróciła status {status!r}; oczekiwano: {expected}")
+        raise AgentError(f"Role {role} returned status {status!r}; expected: {expected}")
     if not isinstance(payload.get("summary"), str) or not payload["summary"].strip():
-        raise AgentError(f"Rola {role} musi zwrócić niepuste summary")
+        raise AgentError(f"Role {role} must return a non-empty summary")
     if role in {"implementer", "reviewer"}:
         evidence = payload.get("acceptanceCriteria")
         if not isinstance(evidence, list):
-            raise AgentError(f"Rola {role} musi ocenić acceptanceCriteria")
+            raise AgentError(f"Role {role} must evaluate acceptanceCriteria")
         by_id: Dict[str, Mapping[str, Any]] = {}
         for item in evidence:
             if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-                raise AgentError(f"Rola {role} zwróciła nieprawidłowy wpis acceptanceCriteria")
+                raise AgentError(f"Role {role} returned an invalid acceptanceCriteria entry")
             if item["id"] in by_id:
-                raise AgentError(f"Rola {role} powtórzyła kryterium {item['id']}")
+                raise AgentError(f"Role {role} returned duplicate criterion {item['id']}")
             by_id[item["id"]] = item
         missing = [criterion for criterion in task.acceptance_ids if criterion not in by_id]
         extra = sorted(set(by_id) - set(task.acceptance_ids))
         if missing or extra:
             raise AgentError(
-                f"Rola {role} zwróciła niepełny zestaw AC; brak={missing}, nadmiar={extra}"
+                f"Role {role} returned an incomplete AC set; missing={missing}, extra={extra}"
             )
         for criterion_id, item in by_id.items():
             if item.get("status") not in {"PASS", "FAIL"}:
-                raise AgentError(f"{role}: {criterion_id} ma zły status")
+                raise AgentError(f"{role}: {criterion_id} has an invalid status")
             if not isinstance(item.get("evidence"), str) or not item["evidence"].strip():
-                raise AgentError(f"{role}: {criterion_id} nie ma dowodu")
+                raise AgentError(f"{role}: {criterion_id} has no evidence")
         if status in {"IMPLEMENTATION_COMPLETE", "PASS"}:
             failed = [key for key, item in by_id.items() if item.get("status") != "PASS"]
             if failed:
-                raise AgentError(f"Status {status} wymaga PASS dla wszystkich AC; FAIL: {failed}")
+                raise AgentError(f"Status {status} requires PASS for every AC; failed: {failed}")
     if role == "reviewer":
         findings = payload.get("findings")
         if not isinstance(findings, list):
-            raise AgentError("Reviewer musi zwrócić tablicę findings")
+            raise AgentError("Reviewer must return a findings array")
         ids = set()
         for finding in findings:
             if not isinstance(finding, dict):
-                raise AgentError("Reviewer zwrócił nieprawidłowy finding")
+                raise AgentError("Reviewer returned an invalid finding")
             finding_id = finding.get("id")
             if not isinstance(finding_id, str) or not finding_id.startswith("REV-"):
-                raise AgentError("Każdy finding musi mieć stabilne ID REV-…")
+                raise AgentError("Every finding must have a stable REV-* identifier")
             if finding_id in ids:
-                raise AgentError(f"Powtórzony finding: {finding_id}")
+                raise AgentError(f"Duplicate finding: {finding_id}")
             ids.add(finding_id)
             if finding.get("severity") not in {"low", "medium", "high", "critical"}:
-                raise AgentError(f"{finding_id} ma nieprawidłową severity")
+                raise AgentError(f"{finding_id} has an invalid severity")
             if finding.get("status") not in {"open", "resolved"}:
-                raise AgentError(f"{finding_id} ma nieprawidłowy status")
+                raise AgentError(f"{finding_id} has an invalid status")
         if status == "PASS" and any(item.get("status") == "open" for item in findings):
-            raise AgentError("Reviewer nie może zwrócić PASS z otwartymi findingami")
+            raise AgentError("Reviewer cannot return PASS with open findings")

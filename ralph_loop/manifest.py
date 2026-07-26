@@ -88,11 +88,11 @@ class Manifest:
     @classmethod
     def load(cls, path: Path, repo_root: Path) -> "Manifest":
         if not path.is_file():
-            raise ConfigError(f"Brak manifestu: {path}")
+            raise ConfigError(f"Manifest not found: {path}")
         try:
             raw = read_json(path)
         except (OSError, ValueError) as error:
-            raise ConfigError(f"Nie można odczytać manifestu {path}: {error}") from error
+            raise ConfigError(f"Cannot read manifest {path}: {error}") from error
         manifest = cls(path, raw)
         workspace = raw.get("taskWorkspace")
         if workspace is None:
@@ -106,52 +106,52 @@ class Manifest:
 
     def validate(self, repo_root: Path) -> None:
         if self.raw.get("version") != 3:
-            raise ConfigError("Manifest musi mieć version=3")
+            raise ConfigError("Manifest must use version=3")
         if self.raw.get("workflow") != "planner-implementer-reviewer":
-            raise ConfigError("Manifest musi używać workflow=planner-implementer-reviewer")
+            raise ConfigError("Manifest must use workflow=planner-implementer-reviewer")
         raw_tasks = self.raw.get("tasks")
         if not isinstance(raw_tasks, list):
-            raise ConfigError("manifest.tasks musi być tablicą")
+            raise ConfigError("manifest.tasks must be an array")
         if not isinstance(self.workspace, str) or not self.workspace:
-            raise ConfigError("taskWorkspace musi być niepustą ścieżką")
+            raise ConfigError("taskWorkspace must be a non-empty path")
         workspace_path = (repo_root / self.workspace).resolve()
         try:
             workspace_path.relative_to(repo_root.resolve())
         except ValueError as error:
-            raise ConfigError("taskWorkspace musi znajdować się w repozytorium") from error
+            raise ConfigError("taskWorkspace must be inside the repository") from error
 
         ids: Set[str] = set()
         for index, raw in enumerate(raw_tasks):
             label = f"tasks[{index}]"
             if not isinstance(raw, dict):
-                raise ConfigError(f"{label} musi być obiektem")
+                raise ConfigError(f"{label} must be an object")
             task_id = raw.get("id")
             if not isinstance(task_id, str) or not task_id:
-                raise ConfigError(f"{label}.id musi być niepustym napisem")
+                raise ConfigError(f"{label}.id must be a non-empty string")
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", task_id):
                 raise ConfigError(
-                    f"{label}.id może zawierać tylko litery, cyfry, kropki, _ i -"
+                    f"{label}.id may contain only letters, digits, dots, underscores, and hyphens"
                 )
             if task_id in ids:
-                raise ConfigError(f"Powtórzony identyfikator zadania: {task_id}")
+                raise ConfigError(f"Duplicate task identifier: {task_id}")
             ids.add(task_id)
             if not isinstance(raw.get("title"), str) or not raw["title"]:
-                raise ConfigError(f"{task_id}.title musi być niepustym napisem")
+                raise ConfigError(f"{task_id}.title must be a non-empty string")
             if raw.get("status") not in ALL_STATUSES:
-                raise ConfigError(f"{task_id}.status ma nieobsługiwaną wartość")
+                raise ConfigError(f"{task_id}.status has an unsupported value")
             if not isinstance(raw.get("path"), str) or not raw["path"]:
-                raise ConfigError(f"{task_id}.path musi być niepustą ścieżką")
+                raise ConfigError(f"{task_id}.path must be a non-empty path")
             task_path = (workspace_path / raw["path"]).resolve()
             try:
                 task_path.relative_to(workspace_path)
             except ValueError as error:
-                raise ConfigError(f"{task_id}.path wychodzi poza taskWorkspace") from error
+                raise ConfigError(f"{task_id}.path escapes taskWorkspace") from error
             try:
                 dependencies = ensure_string_list(raw.get("dependsOn", []), f"{task_id}.dependsOn")
             except ValueError as error:
                 raise ConfigError(str(error)) from error
             if task_id in dependencies:
-                raise ConfigError(f"{task_id} nie może zależeć od samego siebie")
+                raise ConfigError(f"{task_id} cannot depend on itself")
             self._validate_contract(raw, task_id)
             self._validate_gates(raw, task_id)
             self._validate_attempts(raw, task_id)
@@ -159,53 +159,53 @@ class Manifest:
         for task in self.tasks:
             missing = sorted(set(task.depends_on) - ids)
             if missing:
-                raise ConfigError(f"{task.id} ma nieznane zależności: {', '.join(missing)}")
+                raise ConfigError(f"{task.id} has unknown dependencies: {', '.join(missing)}")
         self._validate_acyclic()
 
     def _validate_contract(self, raw: Dict[str, Any], task_id: str) -> None:
         contract = raw.get("contract")
         if not isinstance(contract, dict):
-            raise ConfigError(f"{task_id}.contract musi być obiektem")
+            raise ConfigError(f"{task_id}.contract must be an object")
         criteria = contract.get("acceptanceCriteria")
         if not isinstance(criteria, list) or not criteria:
-            raise ConfigError(f"{task_id} musi mieć co najmniej jedno acceptance criterion")
+            raise ConfigError(f"{task_id} must define at least one acceptance criterion")
         criterion_ids: Set[str] = set()
         for criterion in criteria:
             if not isinstance(criterion, dict):
-                raise ConfigError(f"{task_id}.contract.acceptanceCriteria zawiera złą wartość")
+                raise ConfigError(f"{task_id}.contract.acceptanceCriteria contains an invalid value")
             criterion_id = criterion.get("id")
             description = criterion.get("description")
             if not isinstance(criterion_id, str) or not criterion_id.startswith("AC-"):
-                raise ConfigError(f"{task_id}: każde kryterium musi mieć ID w formacie AC-…")
+                raise ConfigError(f"{task_id}: every criterion must use an AC-* identifier")
             if criterion_id in criterion_ids:
-                raise ConfigError(f"{task_id}: powtórzone kryterium {criterion_id}")
+                raise ConfigError(f"{task_id}: duplicate criterion {criterion_id}")
             criterion_ids.add(criterion_id)
             if not isinstance(description, str) or not description:
-                raise ConfigError(f"{task_id}.{criterion_id} nie ma opisu")
+                raise ConfigError(f"{task_id}.{criterion_id} has no description")
         try:
             allowed = ensure_string_list(contract.get("allowedPaths"), f"{task_id}.contract.allowedPaths")
         except ValueError as error:
             raise ConfigError(str(error)) from error
         if not allowed:
-            raise ConfigError(f"{task_id}.contract.allowedPaths nie może być puste")
+            raise ConfigError(f"{task_id}.contract.allowedPaths cannot be empty")
         for pattern in allowed:
             components = pattern.replace("\\", "/").split("/")
             if pattern.startswith(("/", "~")) or ".." in components:
-                raise ConfigError(f"{task_id}: niedozwolony wzorzec ścieżki {pattern!r}")
+                raise ConfigError(f"{task_id}: forbidden path pattern {pattern!r}")
         non_goals = contract.get("nonGoals", [])
         if not isinstance(non_goals, list) or not all(isinstance(item, str) for item in non_goals):
-            raise ConfigError(f"{task_id}.contract.nonGoals musi być tablicą napisów")
+            raise ConfigError(f"{task_id}.contract.nonGoals must be an array of strings")
 
     def _validate_gates(self, raw: Dict[str, Any], task_id: str) -> None:
         gates = raw.get("qualityGates")
         if not isinstance(gates, list) or not gates:
-            raise ConfigError(f"{task_id}.qualityGates nie może być puste")
+            raise ConfigError(f"{task_id}.qualityGates cannot be empty")
         names: Set[str] = set()
         for gate in gates:
             if not isinstance(gate, dict) or not isinstance(gate.get("name"), str) or not gate["name"]:
-                raise ConfigError(f"{task_id}: quality gate musi mieć nazwę")
+                raise ConfigError(f"{task_id}: every quality gate must have a name")
             if gate["name"] in names:
-                raise ConfigError(f"{task_id}: powtórzona bramka {gate['name']}")
+                raise ConfigError(f"{task_id}: duplicate quality gate {gate['name']}")
             names.add(gate["name"])
             try:
                 gate["command"] = ensure_command(gate.get("command"), f"{task_id}.{gate['name']}.command")
@@ -213,20 +213,20 @@ class Manifest:
                 raise ConfigError(str(error)) from error
             timeout = gate.get("timeoutSeconds", 600)
             if not isinstance(timeout, int) or timeout < 1:
-                raise ConfigError(f"{task_id}.{gate['name']}.timeoutSeconds musi być dodatni")
+                raise ConfigError(f"{task_id}.{gate['name']}.timeoutSeconds must be positive")
 
     def _validate_attempts(self, raw: Dict[str, Any], task_id: str) -> None:
         limits = raw.get("limits")
         attempts = raw.get("attempts", {})
         if not isinstance(limits, dict) or not isinstance(attempts, dict):
-            raise ConfigError(f"{task_id}.limits i attempts muszą być obiektami")
+            raise ConfigError(f"{task_id}.limits and attempts must be objects")
         for stage in STAGES:
             limit = limits.get(stage)
             attempt = attempts.get(stage, 0)
             if not isinstance(limit, int) or limit < 1:
-                raise ConfigError(f"{task_id}.limits.{stage} musi być dodatni")
+                raise ConfigError(f"{task_id}.limits.{stage} must be positive")
             if not isinstance(attempt, int) or attempt < 0:
-                raise ConfigError(f"{task_id}.attempts.{stage} nie może być ujemne")
+                raise ConfigError(f"{task_id}.attempts.{stage} cannot be negative")
 
     def _validate_acyclic(self) -> None:
         graph = {task.id: task.depends_on for task in self.tasks}
@@ -235,7 +235,7 @@ class Manifest:
 
         def visit(task_id: str) -> None:
             if task_id in visiting:
-                raise ConfigError(f"Wykryto cykl zależności przy {task_id}")
+                raise ConfigError(f"Dependency cycle detected at {task_id}")
             if task_id in visited:
                 return
             visiting.add(task_id)
@@ -251,7 +251,7 @@ class Manifest:
         for task in self.tasks:
             if task.id == task_id:
                 return task
-        raise ConfigError(f"Nie znaleziono zadania {task_id}")
+        raise ConfigError(f"Task not found: {task_id}")
 
     def promote_dependencies(self) -> List[str]:
         completed = {task.id for task in self.tasks if task.status == "completed"}

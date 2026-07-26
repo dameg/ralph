@@ -23,25 +23,25 @@ from .util import atomic_write_json, read_json, relative_path
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="ralph",
-        description="Deterministyczna pętla planner → implementer → reviewer dla Codex.",
+        description="Deterministic planner → implementer → reviewer loop for Codex.",
     )
     result.add_argument("--version", action="version", version=f"ralph {__version__}")
     subcommands = result.add_subparsers(dest="command", required=True)
 
-    init = subcommands.add_parser("init", help="Utwórz konfigurację i szablony")
+    init = subcommands.add_parser("init", help="Create configuration and templates")
     init.add_argument("--manifest", default="docs/tasks/manifest.json")
     init.add_argument("--prd", default="docs/prd.md")
-    init.add_argument("--force", action="store_true", help="Nadpisz szablony Ralph")
+    init.add_argument("--force", action="store_true", help="Overwrite Ralph templates")
 
-    run = subcommands.add_parser("run", help="Uruchom lub wznów pętlę")
+    run = subcommands.add_parser("run", help="Run or resume the loop")
     run.add_argument("--max-iterations", type=int)
     run.add_argument("--verbose", action="store_true")
     run.add_argument("--color", choices=("auto", "always", "never"))
 
-    status = subcommands.add_parser("status", help="Pokaż stan workflow")
+    status = subcommands.add_parser("status", help="Show workflow status")
     status.add_argument("--color", choices=("auto", "always", "never"))
 
-    doctor = subcommands.add_parser("doctor", help="Sprawdź konfigurację i wymagania")
+    doctor = subcommands.add_parser("doctor", help="Check configuration and prerequisites")
     doctor.add_argument("--color", choices=("auto", "always", "never"))
     return result
 
@@ -63,7 +63,7 @@ def main(arguments: Optional[List[str]] = None) -> int:
         ui = UI(color=color, verbose=getattr(args, "verbose", False))
         if args.command == "run":
             if args.max_iterations is not None and args.max_iterations < 1:
-                raise ConfigError("--max-iterations musi być dodatnie")
+                raise ConfigError("--max-iterations must be positive")
             return Orchestrator(config, ui).run(args.max_iterations)
         if args.command == "status":
             return _status(config, ui)
@@ -86,7 +86,7 @@ def _repository_root(cwd: Path) -> Path:
         check=False,
     )
     if result.returncode != 0:
-        raise ConfigError("Ralph musi być uruchomiony w repozytorium Git")
+        raise ConfigError("Ralph must run inside a Git repository")
     return Path(result.stdout.strip()).resolve()
 
 
@@ -98,9 +98,9 @@ def _init(root: Path, manifest_value: str, prd_value: str, force: bool, ui: UI) 
         try:
             path.relative_to(root)
         except ValueError as error:
-            raise ConfigError(f"{label} musi znajdować się w repozytorium") from error
+            raise ConfigError(f"{label} must be inside the repository") from error
     if config_path.exists() and not force:
-        raise ConfigError(f"Konfiguracja już istnieje: {config_path} (użyj --force)")
+        raise ConfigError(f"Configuration already exists: {config_path} (use --force)")
 
     raw = copy.deepcopy(DEFAULT_CONFIG)
     raw["manifest"] = relative_path(root, manifest_path)
@@ -117,14 +117,14 @@ def _init(root: Path, manifest_value: str, prd_value: str, force: bool, ui: UI) 
     if not prd_path.exists():
         prd_path.parent.mkdir(parents=True, exist_ok=True)
         prd_path.write_text(
-            "# Product requirements document\n\nTODO: opisz zakres modułu przed dodaniem zadań.\n",
+            "# Product requirements document\n\nTODO: describe the module scope before adding tasks.\n",
             encoding="utf-8",
         )
-    ui.banner("RALPH LOOP v3", "inicjalizacja zakończona")
-    ui.success(f"Konfiguracja: {relative_path(root, config_path)}")
+    ui.banner("RALPH LOOP v3", "initialization complete")
+    ui.success(f"Configuration: {relative_path(root, config_path)}")
     ui.info(f"Manifest: {relative_path(root, manifest_path)}", "📋")
     ui.info(f"PRD: {relative_path(root, prd_path)}", "📝")
-    ui.warning("Uzupełnij PRD i zadania w manifeście, a następnie zatwierdź pliki w Git.")
+    ui.warning("Complete the PRD and manifest tasks, then commit the files to Git.")
     return 0
 
 
@@ -151,7 +151,7 @@ def _active_manifest(config: Config) -> tuple[Manifest, Optional[Dict[str, Any]]
             if data.get("active"):
                 active.append(data)
     if len(active) > 1:
-        raise ConfigError("Wykryto więcej niż jedną aktywną sesję")
+        raise ConfigError("More than one active session was detected")
     if active:
         worktree = Path(active[0]["worktree"])
         manifest = Manifest.load(worktree / relative_path(config.root, config.manifest_path), worktree)
@@ -161,16 +161,16 @@ def _active_manifest(config: Config) -> tuple[Manifest, Optional[Dict[str, Any]]
 
 def _status(config: Config, ui: UI) -> int:
     manifest, session = _active_manifest(config)
-    ui.banner("RALPH STATUS", "aktualny stan workflow")
+    ui.banner("RALPH STATUS", "current workflow state")
     if session:
         ui.info(
-            f"Aktywne: {session['taskId']} · {session['branch']}",
+            f"Active: {session['taskId']} · {session['branch']}",
             "🔄",
         )
     else:
-        ui.info("Brak aktywnej sesji", "💤")
+        ui.info("No active session", "💤")
     if not manifest.tasks:
-        ui.warning("Manifest nie zawiera zadań.")
+        ui.warning("The manifest contains no tasks.")
     else:
         for task in manifest.tasks:
             icon = {
@@ -191,24 +191,24 @@ def _status(config: Config, ui: UI) -> int:
 
 
 def _doctor(config: Config, ui: UI) -> int:
-    ui.banner("RALPH DOCTOR", "kontrola środowiska")
+    ui.banner("RALPH DOCTOR", "environment check")
     errors: List[str] = []
     for command in ("git", config.agent.command[0]):
         if shutil.which(command):
-            ui.success(f"Dostępne polecenie: {command}")
+            ui.success(f"Command available: {command}")
         else:
-            errors.append(f"Brak polecenia: {command}")
+            errors.append(f"Command not found: {command}")
             ui.error(errors[-1])
     try:
         git = Git(config.root)
         git.ensure_repository()
-        ui.success("Repozytorium Git jest poprawne")
+        ui.success("Git repository is valid")
         git.ensure_head()
-        ui.success("Repozytorium ma bazowy commit")
+        ui.success("Repository has a base commit")
         git.ensure_identity()
-        ui.success("Autor commitów Git jest skonfigurowany")
+        ui.success("Git commit author is configured")
         git.ensure_clean()
-        ui.success("Główny worktree jest czysty")
+        ui.success("Primary worktree is clean")
     except RalphError as error:
         errors.append(str(error))
         ui.error(str(error))
@@ -216,15 +216,15 @@ def _doctor(config: Config, ui: UI) -> int:
         if path.is_file():
             ui.success(f"{label}: {relative_path(config.root, path)}")
         else:
-            errors.append(f"Brak {label}: {path}")
+            errors.append(f"{label} not found: {path}")
             ui.error(errors[-1])
     try:
         manifest = Manifest.load(config.manifest_path, config.root)
-        ui.success(f"Kontrakt manifestu poprawny · {len(manifest.tasks)} zadań")
+        ui.success(f"Manifest contract is valid · {len(manifest.tasks)} tasks")
         for task in manifest.tasks:
             task_file = config.root / task.task_dir / "task.md"
             if not task_file.is_file():
-                errors.append(f"Brak opisu {task.id}: {task_file}")
+                errors.append(f"Task description not found for {task.id}: {task_file}")
                 ui.error(errors[-1])
     except RalphError as error:
         errors.append(str(error))
@@ -233,10 +233,10 @@ def _doctor(config: Config, ui: UI) -> int:
         for group, suffix in (("prompts", ".md"), ("schemas", "-result.schema.json")):
             path = config.root / ".ralph" / group / f"{role}{suffix}"
             if not path.is_file():
-                errors.append(f"Brak {path}")
+                errors.append(f"File not found: {path}")
                 ui.error(errors[-1])
     if errors:
-        ui.error(f"Wykryto {len(errors)} problemów")
+        ui.error(f"Detected {len(errors)} problems")
         return 1
-    ui.success("Środowisko gotowe do uruchomienia 🚀")
+    ui.success("Environment is ready 🚀")
     return 0

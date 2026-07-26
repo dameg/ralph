@@ -66,19 +66,19 @@ class UI:
             yield
         except Exception:
             elapsed = time.monotonic() - started
-            print(f"   {self.paint(f'niepowodzenie ({elapsed:.1f}s)', 'red')}")
+            print(f"   {self.paint(f'failed ({elapsed:.1f}s)', 'red')}")
             raise
         else:
             elapsed = time.monotonic() - started
-            print(f"   {self.paint(f'gotowe ({elapsed:.1f}s)', 'green')}")
+            print(f"   {self.paint(f'done ({elapsed:.1f}s)', 'green')}")
 
     def summary(self, completed: int, total: int, blocked: int, failed: int) -> None:
         print()
         print(self.paint("━" * 68, "blue"))
         print(
-            f"📊 {completed}/{total} ukończonych"
-            f"  ·  ⛔ {blocked} zablokowanych"
-            f"  ·  ❌ {failed} nieudanych"
+            f"📊 {completed}/{total} completed"
+            f"  ·  ⛔ {blocked} blocked"
+            f"  ·  ❌ {failed} failed"
         )
         print(self.paint("━" * 68, "blue"))
 

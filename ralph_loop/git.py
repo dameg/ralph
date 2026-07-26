@@ -31,7 +31,7 @@ class Git:
                 check=False,
             )
         except OSError as error:
-            raise GitError(f"Nie można uruchomić Git: {error}") from error
+            raise GitError(f"Cannot run Git: {error}") from error
         if check and result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip()
             raise GitError(f"git {' '.join(arguments)}: {detail}")
@@ -40,28 +40,28 @@ class Git:
     def ensure_repository(self) -> None:
         result = self.run(["rev-parse", "--show-toplevel"], check=False)
         if result.returncode != 0:
-            raise GitError("Ralph musi być uruchomiony w repozytorium Git")
+            raise GitError("Ralph must run inside a Git repository")
         actual = Path(result.stdout.strip()).resolve()
         if actual != self.root:
-            raise GitError(f"Uruchom Ralph z katalogu głównego repozytorium: {actual}")
+            raise GitError(f"Run Ralph from the repository root: {actual}")
 
     def ensure_clean(self) -> None:
         paths = self.changed_paths()
         if paths:
             preview = ", ".join(paths[:5])
             suffix = "…" if len(paths) > 5 else ""
-            raise GitError(f"Główny worktree nie jest czysty: {preview}{suffix}")
+            raise GitError(f"The primary worktree is not clean: {preview}{suffix}")
 
     def ensure_head(self) -> None:
         result = self.run(["rev-parse", "--verify", "HEAD"], check=False)
         if result.returncode != 0:
-            raise GitError("Repozytorium nie ma jeszcze pierwszego commita")
+            raise GitError("The repository does not have an initial commit")
 
     def ensure_identity(self) -> None:
         result = self.run(["var", "GIT_AUTHOR_IDENT"], check=False)
         if result.returncode != 0:
             raise GitError(
-                "Brak konfiguracji autora Git (user.name/user.email); commit nie byłby możliwy"
+                "Git author identity is not configured (user.name/user.email); cannot create commits"
             )
 
     def exclude_runtime(self, runtime_relative: str) -> None:
@@ -83,7 +83,7 @@ class Git:
     def current_branch(self, cwd: Optional[Path] = None) -> str:
         branch = self.run(["branch", "--show-current"], cwd=cwd).stdout.strip()
         if not branch:
-            raise GitError("Detached HEAD nie jest obsługiwany")
+            raise GitError("Detached HEAD is not supported")
         return branch
 
     def branch_exists(self, branch: str) -> bool:
@@ -97,7 +97,7 @@ class Git:
         result = self.run(["worktree", "remove", str(path)], check=False)
         if result.returncode != 0 and path.exists():
             detail = result.stderr.strip() or result.stdout.strip()
-            raise GitError(f"Nie udało się usunąć worktree {path}: {detail}")
+            raise GitError(f"Failed to remove worktree {path}: {detail}")
 
     def delete_branch(self, branch: str) -> None:
         self.run(["branch", "-d", branch])
@@ -162,12 +162,12 @@ class Git:
         )
         if violations:
             raise ScopeError(
-                f"Rola {role} zmieniła niedozwolone pliki: {', '.join(violations)}"
+                f"Role {role} modified files outside its scope: {', '.join(violations)}"
             )
 
     def commit_all(self, cwd: Path, message: str) -> str:
         if not self.changed_paths(cwd):
-            raise GitError("Brak zmian do zapisania")
+            raise GitError("There are no changes to commit")
         self.run(["add", "-A", "--", ":/"], cwd=cwd)
         self.run(["commit", "-m", message], cwd=cwd)
         return self.head(cwd)
@@ -178,12 +178,12 @@ class Git:
         self.ensure_clean()
         if expected_branch and self.current_branch() != expected_branch:
             raise GitError(
-                f"Aktywna gałąź to {self.current_branch()}, oczekiwano {expected_branch}"
+                f"The active branch is {self.current_branch()}; expected {expected_branch}"
             )
         actual = self.head()
         if actual != expected_base:
             raise GitError(
-                "Główna gałąź zmieniła się podczas pracy zadania; pozostawiam bezpieczną gałąź roboczą"
+                "The primary branch changed while the task was running; preserving the isolated task branch"
             )
         self.run(["merge", "--ff-only", branch])
         return self.head()

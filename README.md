@@ -1,67 +1,68 @@
 # Ralph Loop v3 🤖
 
-Deterministyczny orkiestrator Codex do implementowania całych modułów na podstawie
-PRD. Model wykonuje pracę twórczą, ale o przejściach stanu, zakresie zmian,
-testach i finalizacji decyduje kod orkiestratora.
+A deterministic Codex orchestrator for implementing complete modules from a
+PRD. The model performs the creative work, while the orchestrator controls state
+transitions, file scope, validation, and finalization.
 
-## Przepływ
+## Workflow
 
 ```text
-📋 kontrakt zadania
+📋 task contract
    ↓
-🧠 Planner ──→ walidacja wyniku JSON i zakresu zmian
+🧠 Planner ──→ JSON result and file-scope validation
    ↓
-🛠️  Implementer ──→ 🧪 deterministyczne quality gates
+🛠️  Implementer ──→ 🧪 deterministic quality gates
    ↑                         ↓
-   └──── poprawki ←── 🔍 niezależny Reviewer
+   └──── fixes ←──── 🔍 independent Reviewer
                               ↓ PASS
-                   🧪 finalne quality gates
+                   🧪 final quality gates
                               ↓
                    📦 commit → 🔗 fast-forward
 ```
 
-Każde zadanie działa na osobnej gałęzi i w osobnym Git worktree. Główna gałąź
-jest przesuwana dopiero po `PASS`, ponownym przejściu wszystkich bramek i
-potwierdzonym commicie. Wyniki ról, pełne logi i append-only journal trafiają do
-`.ralph/runtime/` i nie są commitowane.
+Every task runs on an isolated branch in a separate Git worktree. The primary
+branch moves forward only after `PASS`, another successful quality-gate run, and
+a confirmed commit. Role results, complete logs, and the append-only journal are
+stored under `.ralph/runtime/` and are never committed.
 
-## Start
+## Getting started
 
-Wymagania: Python 3.9+, Git oraz zalogowany Codex CLI.
+Requirements: Python 3.9+, Git, and an authenticated Codex CLI.
 
 ```bash
 ./ralph init --prd docs/my-module-prd.md \
   --manifest docs/tasks/my-module/manifest.json
 
-# Uzupełnij PRD, manifest i task.md, a potem zacommituj stan początkowy.
+# Complete the PRD, manifest, and task.md, then commit the initial state.
 ./ralph doctor
 ./ralph status
 ./ralph run
 ```
 
-Instalacja jako polecenie systemowe jest opcjonalna:
+Installing a system-wide command is optional:
 
 ```bash
 python3 -m pip install -e .
 ralph run
 ```
 
-## Kontrakt zadania
+## Task contract
 
-Kompletny przykład jest w [`examples/manifest.json`](examples/manifest.json), a
-szablon opisu zadania w [`examples/task.md`](examples/task.md).
+A complete example is available in
+[`examples/manifest.json`](examples/manifest.json), with a task-description
+template in [`examples/task.md`](examples/task.md).
 
-Każde zadanie musi mieć:
+Every task must define:
 
-- stabilne ID i zależności;
-- kryteria `AC-*` z jednoznacznym opisem;
-- `contract.allowedPaths`, czyli technicznie egzekwowany zakres implementera;
-- quality gates jako tablice argumentów, np. `["npm", "test"]` — bez `sh -c` i
-  bez wyciągania skryptów z Markdowna;
-- osobne limity prób dla planowania, implementacji i review;
-- katalog z `task.md`.
+- a stable identifier and dependencies;
+- explicit `AC-*` acceptance criteria;
+- `contract.allowedPaths`, which technically enforces the implementer's scope;
+- quality gates represented as argument arrays such as `["npm", "test"]`, with
+  no `sh -c` and no scripts extracted from Markdown;
+- separate attempt limits for planning, implementation, and review;
+- a task directory containing `task.md`.
 
-Statusy tworzą jawną maszynę stanów:
+Statuses form an explicit state machine:
 
 ```text
 ready → planning → planned → implementing → in_review → completed
@@ -69,43 +70,46 @@ ready → planning → planned → implementing → in_review → completed
             └──────── needs_replan ─────────────────┘
 ```
 
-`blocked` i `failed` zatrzymują sesję bez scalania częściowego kodu. Gałąź i
-worktree pozostają wtedy dostępne do inspekcji, a terminal pokazuje ich nazwę.
+The `blocked` and `failed` states stop the session without merging partial code.
+The isolated branch and worktree remain available for inspection, and their
+locations are shown in the terminal.
 
-## Determinizm i bezpieczeństwo
+## Determinism and safety
 
-- Wynik każdej roli przechodzi przez JSON Schema oraz dodatkową walidację
-  kompletności dowodów dla wszystkich `AC-*`.
-- Planner może zmienić tylko `plan.md`, reviewer tylko `review.md`, a implementer
-  jedynie `progress.md` oraz ścieżki z kontraktu.
-- Niedozwolona zmiana natychmiast zatrzymuje workflow.
-- Quality gates są uruchamiane bez powłoki, z timeoutem oraz stałymi `TZ`, locale
-  i `PYTHONHASHSEED`.
-- Sieć agenta jest domyślnie wyłączona. Można ją jawnie włączyć w
-  `.ralph/config.json`, jeżeli zadanie rzeczywiście jej wymaga.
-- Przed review i po `PASS` wykonywany jest ten sam zestaw bramek.
-- Journal pozwala odtworzyć commit po przerwaniu procesu między commitem a
-  fast-forwardem.
-- Główny worktree musi być czysty i nie może zmienić HEAD podczas pracy zadania.
+- Every role result is checked against a JSON Schema and then validated for
+  complete evidence covering every `AC-*` criterion.
+- The planner may modify only `plan.md`, the reviewer only `review.md`, and the
+  implementer only `progress.md` plus paths allowed by the task contract.
+- Any out-of-scope modification stops the workflow immediately.
+- Quality gates run without a shell, with a timeout and fixed `TZ`, locale, and
+  `PYTHONHASHSEED` values.
+- Agent network access is disabled by default. It can be enabled explicitly in
+  `.ralph/config.json` when a task genuinely requires it.
+- The same quality gates run immediately before review and again after `PASS`.
+- The journal can recover a commit when execution stops between commit creation
+  and fast-forward.
+- The primary worktree must stay clean and its HEAD cannot change while a task
+  is running.
 
-## Czysty terminal ✨
+## Clean terminal output ✨
 
-Standardowy widok pokazuje wyłącznie etapy, wynik, czas oraz odnośnik do logu w
-razie błędu. Surowy output Codex i testów jest przechowywany w runtime zamiast
-zalewać terminal. `./ralph run --verbose` dodaje stan i liczniki prób, a
-`--color never` wyłącza ANSI (emoji pozostają).
+The default view displays only stages, results, elapsed time, and a log path on
+failure. Raw Codex and test output is stored in runtime files instead of flooding
+the terminal. `./ralph run --verbose` adds state and attempt counters, while
+`--color never` disables ANSI colors but keeps emoji.
 
 ## Recovery
 
-Ponowne `./ralph run` automatycznie używa aktywnego worktree. Jeśli proces padł
-po utworzeniu commita, ale przed fast-forwardem, Ralph wykrywa commit po SHA i
-kończy transakcję. Przy blokadzie nic nie jest scalane do głównej gałęzi.
+Running `./ralph run` again automatically resumes the active worktree. If the
+process stopped after creating a commit but before fast-forwarding, Ralph finds
+the commit by SHA and completes the transaction. Blocked work is never merged
+into the primary branch.
 
-## Testy Ralpha
+## Testing Ralph
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-Test end-to-end używa fałszywych agentów i prawdziwych worktree/commitów, dzięki
-czemu pilnuje również samej „fabryki aplikacji”, nie tylko generowanego kodu.
+The end-to-end test uses fake agents with real Git worktrees and commits, so the
+test suite protects the application factory itself, not only generated code.

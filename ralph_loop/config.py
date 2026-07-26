@@ -42,52 +42,52 @@ class Config:
         config_path = (path or root / ".ralph" / "config.json").resolve()
         if not config_path.is_file():
             raise ConfigError(
-                f"Brak konfiguracji: {config_path}. Uruchom najpierw `./ralph init`."
+                f"Configuration not found: {config_path}. Run `./ralph init` first."
             )
         try:
             with config_path.open("r", encoding="utf-8") as handle:
                 raw = json.load(handle)
         except (OSError, json.JSONDecodeError) as error:
-            raise ConfigError(f"Nie można odczytać {config_path}: {error}") from error
+            raise ConfigError(f"Cannot read {config_path}: {error}") from error
         if not isinstance(raw, dict) or raw.get("version") != 1:
-            raise ConfigError("Konfiguracja musi być obiektem JSON z version=1")
+            raise ConfigError("Configuration must be a JSON object with version=1")
 
         def resolve(value: Any, label: str) -> Path:
             if not isinstance(value, str) or not value:
-                raise ConfigError(f"{label} musi być ścieżką względną")
+                raise ConfigError(f"{label} must be a relative path")
             candidate = (root / value).resolve()
             try:
                 candidate.relative_to(root)
             except ValueError as error:
-                raise ConfigError(f"{label} musi wskazywać wnętrze repozytorium") from error
+                raise ConfigError(f"{label} must point inside the repository") from error
             return candidate
 
         agent_raw = raw.get("agent", {})
         git_raw = raw.get("git", {})
         if not isinstance(agent_raw, dict) or not isinstance(git_raw, dict):
-            raise ConfigError("agent i git muszą być obiektami JSON")
+            raise ConfigError("agent and git must be JSON objects")
         try:
             command = ensure_command(agent_raw.get("command", ["codex", "exec"]), "agent.command")
         except ValueError as error:
             raise ConfigError(str(error)) from error
         sandbox = agent_raw.get("sandbox", "workspace-write")
         if sandbox not in {"read-only", "workspace-write"}:
-            raise ConfigError("agent.sandbox może być tylko read-only lub workspace-write")
+            raise ConfigError("agent.sandbox must be read-only or workspace-write")
         timeout = agent_raw.get("timeoutSeconds", 1800)
         max_iterations = raw.get("maxIterations", 30)
         if not isinstance(timeout, int) or timeout < 1:
-            raise ConfigError("agent.timeoutSeconds musi być dodatnią liczbą całkowitą")
+            raise ConfigError("agent.timeoutSeconds must be a positive integer")
         if not isinstance(max_iterations, int) or max_iterations < 1:
-            raise ConfigError("maxIterations musi być dodatnią liczbą całkowitą")
+            raise ConfigError("maxIterations must be a positive integer")
         color = raw.get("ui", {}).get("color", "auto") if isinstance(raw.get("ui", {}), dict) else "auto"
         if color not in {"auto", "always", "never"}:
-            raise ConfigError("ui.color musi mieć wartość auto, always lub never")
+            raise ConfigError("ui.color must be auto, always, or never")
         branch_prefix = git_raw.get("branchPrefix", "ralph/")
         if not isinstance(branch_prefix, str) or not branch_prefix:
-            raise ConfigError("git.branchPrefix nie może być pusty")
+            raise ConfigError("git.branchPrefix cannot be empty")
         model = agent_raw.get("model")
         if model is not None and (not isinstance(model, str) or not model):
-            raise ConfigError("agent.model musi być niepustym napisem")
+            raise ConfigError("agent.model must be a non-empty string")
 
         return cls(
             root=root,
