@@ -42,6 +42,7 @@ class Session:
         branch: str,
         base_sha: str,
         base_branch: str,
+        prd: str,
     ) -> "Session":
         path = runtime / "sessions" / task_id / "state.json"
         session = cls(
@@ -53,6 +54,7 @@ class Session:
                 "branch": branch,
                 "baseSha": base_sha,
                 "baseBranch": base_branch,
+                "prd": prd,
                 "commitSha": None,
                 "merged": False,
                 "active": True,

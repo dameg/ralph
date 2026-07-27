@@ -48,6 +48,21 @@ python3 -m pip install -e .
 ralph run
 ```
 
+### Run a PRD generated from a conversation
+
+Generate and save a PRD with your preferred tool, for example `to-prd` in
+Cursor, then point Ralph at it for that run:
+
+```bash
+./ralph run --prd docs/prds/checkout.md
+```
+
+The override is transient: it does not modify `.ralph/config.json`. It must be
+provided again when resuming an active task. Ralph records the selected PRD in
+the session and refuses a resume with a different one. The manifest and each
+`task.md` remain the implementation contract; a task-level `prd` field takes
+precedence when you are coordinating multiple PRDs.
+
 ## Task contract
 
 A complete example is available in
