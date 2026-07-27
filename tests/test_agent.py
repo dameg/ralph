@@ -40,6 +40,9 @@ class AgentResultTests(unittest.TestCase):
                         {
                             "id": "REV-001",
                             "severity": "high",
+                            "file": "src/value.txt",
+                            "description": "Incorrect value",
+                            "expectedBehavior": "The value is correct",
                             "status": "open",
                         }
                     ],
@@ -55,6 +58,48 @@ class AgentResultTests(unittest.TestCase):
         self.task.raw["prd"] = "docs/prds/billing.md"
         prompt = CodexAgent(repo.config)._prompt("planner", self.task, "")
         self.assertIn("docs/prds/billing.md, the PRD assigned to this task", prompt)
+
+    def test_planner_result_requires_the_complete_schema(self):
+        with self.assertRaisesRegex(AgentError, "filesPlanned"):
+            validate_role_result(
+                "planner",
+                {
+                    "status": "READY",
+                    "summary": "Ready",
+                    "verificationCommands": [
+                        list(gate["command"]) for gate in self.task.gates
+                    ],
+                },
+                self.task,
+            )
+
+    def test_planner_result_rejects_files_outside_scope(self):
+        with self.assertRaisesRegex(AgentError, "outside the task scope"):
+            validate_role_result(
+                "planner",
+                {
+                    "status": "READY",
+                    "summary": "Ready",
+                    "filesPlanned": ["forbidden.txt"],
+                    "verificationCommands": [
+                        list(gate["command"]) for gate in self.task.gates
+                    ],
+                },
+                self.task,
+            )
+
+    def test_planner_result_must_use_exact_quality_gates(self):
+        with self.assertRaisesRegex(AgentError, "exactly match"):
+            validate_role_result(
+                "planner",
+                {
+                    "status": "READY",
+                    "summary": "Ready",
+                    "filesPlanned": ["src/value.txt"],
+                    "verificationCommands": [["python3", "-m", "unittest"]],
+                },
+                self.task,
+            )
 
 
 if __name__ == "__main__":

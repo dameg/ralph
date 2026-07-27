@@ -89,6 +89,18 @@ class Git:
     def branch_exists(self, branch: str) -> bool:
         return self.run(["show-ref", "--verify", f"refs/heads/{branch}"], check=False).returncode == 0
 
+    def branch_head(self, branch: str) -> str:
+        return self.run(["rev-parse", "--verify", f"refs/heads/{branch}"]).stdout.strip()
+
+    def is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        result = self.run(
+            ["merge-base", "--is-ancestor", ancestor, descendant], check=False
+        )
+        if result.returncode not in {0, 1}:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise GitError(f"Cannot compare commits {ancestor} and {descendant}: {detail}")
+        return result.returncode == 0
+
     def add_worktree(self, path: Path, branch: str, base_sha: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.run(["worktree", "add", "-b", branch, str(path), base_sha])
@@ -171,6 +183,17 @@ class Git:
         self.run(["add", "-A", "--", ":/"], cwd=cwd)
         self.run(["commit", "-m", message], cwd=cwd)
         return self.head(cwd)
+
+    def commit_parent(self, commit: str, cwd: Optional[Path] = None) -> str:
+        return self.run(["rev-parse", f"{commit}^"], cwd=cwd).stdout.strip()
+
+    def committed_paths(
+        self, base: str, commit: str, cwd: Optional[Path] = None
+    ) -> List[str]:
+        result = self.run(
+            ["diff", "--name-only", "--no-renames", "-z", base, commit], cwd=cwd
+        )
+        return sorted(path for path in result.stdout.split("\0") if path)
 
     def fast_forward(
         self, expected_base: str, branch: str, expected_branch: Optional[str] = None

@@ -114,7 +114,9 @@ class SuccessfulAgent:
                 "status": "READY",
                 "summary": "Plan ready",
                 "filesPlanned": ["src/value.txt"],
-                "verificationCommands": [["python3", "-m", "unittest"]],
+                "verificationCommands": [
+                    list(gate["command"]) for gate in task.gates
+                ],
             }
         elif role == "implementer":
             (root / "src").mkdir(exist_ok=True)

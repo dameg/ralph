@@ -120,6 +120,12 @@ class Config:
         branch_prefix = git_raw.get("branchPrefix", "ralph/")
         if not isinstance(branch_prefix, str) or not branch_prefix:
             raise ConfigError("git.branchPrefix cannot be empty")
+        network_access = agent_raw.get("networkAccess", False)
+        if not isinstance(network_access, bool):
+            raise ConfigError("agent.networkAccess must be a boolean")
+        keep_branches = git_raw.get("keepBranches", False)
+        if not isinstance(keep_branches, bool):
+            raise ConfigError("git.keepBranches must be a boolean")
         model = agent_raw.get("model")
         if model is not None and (not isinstance(model, str) or not model):
             raise ConfigError("agent.model must be a non-empty string")
@@ -136,14 +142,14 @@ class Config:
             agent=AgentConfig(
                 command=command,
                 sandbox=sandbox,
-                network_access=bool(agent_raw.get("networkAccess", False)),
+                network_access=network_access,
                 timeout_seconds=timeout,
                 model=model,
                 roles=roles,
             ),
             git=GitConfig(
                 branch_prefix=branch_prefix,
-                keep_branches=bool(git_raw.get("keepBranches", False)),
+                keep_branches=keep_branches,
             ),
         )
 
