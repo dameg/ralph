@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -34,6 +35,11 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--force", action="store_true", help="Overwrite Ralph templates")
 
     run = subcommands.add_parser("run", help="Run or resume the loop")
+    run.add_argument(
+        "--prd",
+        metavar="PATH",
+        help="Use this PRD for this run without changing .ralph/config.json",
+    )
     run.add_argument("--max-iterations", type=int)
     run.add_argument("--verbose", action="store_true")
     run.add_argument("--color", choices=("auto", "always", "never"))
@@ -64,6 +70,8 @@ def main(arguments: Optional[List[str]] = None) -> int:
         if args.command == "run":
             if args.max_iterations is not None and args.max_iterations < 1:
                 raise ConfigError("--max-iterations must be positive")
+            if args.prd:
+                config = _with_prd_override(config, args.prd)
             return Orchestrator(config, ui).run(args.max_iterations)
         if args.command == "status":
             return _status(config, ui)
@@ -88,6 +96,18 @@ def _repository_root(cwd: Path) -> Path:
     if result.returncode != 0:
         raise ConfigError("Ralph must run inside a Git repository")
     return Path(result.stdout.strip()).resolve()
+
+
+def _with_prd_override(config: Config, value: str) -> Config:
+    supplied = Path(value)
+    prd_path = (supplied if supplied.is_absolute() else config.root / supplied).resolve()
+    try:
+        prd_path.relative_to(config.root)
+    except ValueError as error:
+        raise ConfigError("--prd must point inside the repository") from error
+    if not prd_path.is_file():
+        raise ConfigError(f"PRD not found: {prd_path}")
+    return replace(config, prd_path=prd_path)
 
 
 def _init(root: Path, manifest_value: str, prd_value: str, force: bool, ui: UI) -> int:

@@ -7,6 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from ralph_loop.cli import _with_prd_override, parser
+from ralph_loop.errors import ConfigError
+
 
 class CliTests(unittest.TestCase):
     def test_init_and_status_on_fresh_repository(self):
@@ -89,6 +92,22 @@ class CliTests(unittest.TestCase):
             agent.model_for("reviewer", 1),
             ("gpt-5.6-terra", "high", False),
         )
+
+    def test_run_prd_override_is_transient_and_requires_a_repo_file(self):
+        from tests.helpers import Repo
+
+        repo = Repo()
+        self.addCleanup(repo.close)
+        prd = repo.root / "docs" / "prds" / "from-cursor.md"
+        prd.parent.mkdir(parents=True)
+        prd.write_text("# Checkout\n", encoding="utf-8")
+
+        args = parser().parse_args(["run", "--prd", "docs/prds/from-cursor.md"])
+        configured = _with_prd_override(repo.config, args.prd)
+        self.assertEqual(configured.prd_path, prd.resolve())
+        self.assertEqual(repo.config.prd_path, (repo.root / "docs" / "prd.md").resolve())
+        with self.assertRaisesRegex(ConfigError, "PRD not found"):
+            _with_prd_override(repo.config, "docs/prds/missing.md")
 
 
 if __name__ == "__main__":

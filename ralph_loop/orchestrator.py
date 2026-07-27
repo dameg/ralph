@@ -94,6 +94,16 @@ class Orchestrator:
         elif len(active) > 1:
             ids = ", ".join(session.data.get("taskId", "?") for session in active)
             raise GitError(f"More than one active session was detected: {ids}")
+        elif (
+            active[0].data.get("prd") is not None
+            and active[0].data["prd"]
+            != relative_path(self.config.root, self.config.prd_path)
+        ):
+            raise ConfigError(
+                f"Active session {active[0].data['taskId']} is bound to PRD "
+                f"{active[0].data['prd']}. Resume it with "
+                f"`ralph run --prd {active[0].data['prd']}`."
+            )
         self._recover_commit(active[0] if active else None)
 
     def _active_sessions(self) -> List[Session]:
@@ -199,6 +209,7 @@ class Orchestrator:
             branch,
             base_sha,
             base_branch,
+            relative_path(self.config.root, self.config.prd_path),
         )
         self.journal.record(
             "session_started",
