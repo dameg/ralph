@@ -6,7 +6,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from ralph_loop.errors import ScopeError
+from ralph_loop.errors import AgentInfrastructureError, ScopeError
 from ralph_loop.manifest import Manifest
 from ralph_loop.orchestrator import Orchestrator
 from ralph_loop.ui import NullUI
@@ -154,6 +154,61 @@ class OrchestratorTests(unittest.TestCase):
         self.assertFalse(final_state["active"])
         self.assertTrue(final_state["merged"])
 
+    def test_completed_merge_with_pending_cleanup_is_recovered(self):
+        class CrashBeforeCleanup(Orchestrator):
+            def _cleanup_session(self, session):
+                raise RuntimeError("simulated crash before cleanup")
+
+        repo = Repo()
+        self.addCleanup(repo.close)
+        with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+            CrashBeforeCleanup(
+                repo.config, NullUI(), agent=SuccessfulAgent()
+            ).run()
+
+        state_path = next(
+            (repo.root / ".ralph" / "runtime" / "sessions").glob("*/state.json")
+        )
+        interrupted = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertTrue(interrupted["merged"])
+        self.assertTrue(interrupted["active"])
+
+        result = Orchestrator(
+            repo.config, NullUI(), agent=SuccessfulAgent()
+        ).run()
+
+        self.assertEqual(result, 0)
+        recovered = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertTrue(recovered["merged"])
+        self.assertFalse(recovered["active"])
+        self.assertFalse(Path(recovered["worktree"]).exists())
+        branches = run(
+            ["git", "branch", "--format=%(refname:short)"], repo.root
+        ).stdout.splitlines()
+        self.assertNotIn("ralph/task-001", branches)
+
+    def test_agent_infrastructure_failure_does_not_consume_attempt(self):
+        class OfflineAgent:
+            def run(self, role, task, root, result_path, log_path, context=""):
+                raise AgentInfrastructureError("agent service unavailable")
+
+        repo = Repo()
+        self.addCleanup(repo.close)
+        with self.assertRaisesRegex(AgentInfrastructureError, "unavailable"):
+            Orchestrator(repo.config, NullUI(), agent=OfflineAgent()).run()
+
+        state_path = next(
+            (repo.root / ".ralph" / "runtime" / "sessions").glob("*/state.json")
+        )
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        worktree = Path(state["worktree"])
+        manifest = Manifest.load(
+            worktree / "docs" / "tasks" / "module" / "manifest.json", worktree
+        )
+        task = manifest.get("TASK-001")
+        self.assertEqual(task.status, "ready")
+        self.assertEqual(task.attempts("planning"), 0)
+
     def test_needs_replan_returns_through_planner(self):
         class ReplanningAgent(SuccessfulAgent):
             def __init__(self):
@@ -226,6 +281,35 @@ class OrchestratorTests(unittest.TestCase):
             Orchestrator(repo.config, NullUI(), agent=SuccessfulAgent()).run()
         self.assertEqual(run(["git", "rev-parse", "HEAD"], repo.root).stdout.strip(), before)
         self.assertFalse((repo.root / "gate-side-effect.txt").exists())
+
+    def test_quality_gate_commit_is_rejected_without_merge(self):
+        task = task_payload()
+        task["qualityGates"] = [
+            {
+                "name": "committing gate",
+                "command": [
+                    "python3",
+                    "-c",
+                    (
+                        "from pathlib import Path; import subprocess; "
+                        "Path('forbidden.txt').write_text('escaped\\n'); "
+                        "subprocess.run(['git', 'add', 'forbidden.txt'], check=True); "
+                        "subprocess.run(['git', 'commit', '-m', 'gate side effect'], "
+                        "check=True, stdout=subprocess.DEVNULL)"
+                    ),
+                ],
+                "timeoutSeconds": 30,
+            }
+        ]
+        repo = Repo(task)
+        self.addCleanup(repo.close)
+        before = run(["git", "rev-parse", "HEAD"], repo.root).stdout.strip()
+
+        with self.assertRaisesRegex(ScopeError, "changed worktree HEAD"):
+            Orchestrator(repo.config, NullUI(), agent=SuccessfulAgent()).run()
+
+        self.assertEqual(run(["git", "rev-parse", "HEAD"], repo.root).stdout.strip(), before)
+        self.assertFalse((repo.root / "forbidden.txt").exists())
 
 
 if __name__ == "__main__":

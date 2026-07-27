@@ -5,7 +5,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .agent import Agent, CodexAgent, validate_role_result
 from .config import Config
-from .errors import AgentError, ConfigError, GateError, GitError, ScopeError
+from .errors import (
+    AgentError,
+    AgentInfrastructureError,
+    ConfigError,
+    GateError,
+    GitError,
+    ScopeError,
+)
 from .gates import GateRunner
 from .git import Git
 from .journal import Journal, Session
@@ -120,35 +127,41 @@ class Orchestrator:
     def _recover_commit(self, session: Optional[Session]) -> None:
         if session is None:
             return
+        commit_sha = session.data.get("commitSha")
+        if session.data.get("merged"):
+            if not commit_sha or not self._base_branch_contains(session, commit_sha):
+                raise GitError(
+                    f"Session {session.data['taskId']} is marked as merged, but "
+                    f"{session.data['baseBranch']} does not contain its confirmed commit"
+                )
+            self.journal.record(
+                "cleanup_recovered",
+                taskId=session.data["taskId"],
+                commitSha=commit_sha,
+            )
+            self._cleanup_session(session)
+            return
         worktree = Path(session.data["worktree"])
         if not worktree.is_dir():
-            if (
-                session.data.get("commitSha")
-                and self.git.head() == session.data["commitSha"]
-            ):
-                if (
-                    not self.config.git.keep_branches
-                    and self.git.branch_exists(session.data["branch"])
-                ):
-                    self.git.delete_branch(session.data["branch"])
+            if commit_sha and self._base_branch_contains(session, commit_sha):
                 session.data["merged"] = True
-                session.data["active"] = False
                 session.save()
                 self.journal.record(
-                    "cleanup_recovered",
+                    "merge_recovered",
                     taskId=session.data["taskId"],
-                    commitSha=session.data["commitSha"],
+                    commitSha=commit_sha,
                 )
+                self._cleanup_session(session)
                 return
             raise GitError(
                 f"Worktree for active session {session.data['taskId']} not found: {worktree}"
             )
         worktree_head = self.git.head(worktree)
-        commit_sha = session.data.get("commitSha")
         if not commit_sha and worktree_head != session.data["baseSha"]:
             manifest = self._manifest_for_session(session)
             task = manifest.get(session.data["taskId"])
             if task.status == "completed":
+                self._validate_task_commit(session, task, worktree_head, worktree)
                 session.data["commitSha"] = worktree_head
                 session.save()
                 commit_sha = worktree_head
@@ -165,7 +178,7 @@ class Orchestrator:
                     "precommit_state_recovered", taskId=task.id, nextStatus="in_review"
                 )
         if commit_sha and not session.data.get("merged"):
-            if self.git.head() == commit_sha:
+            if self._base_branch_contains(session, commit_sha):
                 session.data["merged"] = True
                 session.save()
                 self.journal.record(
@@ -177,6 +190,10 @@ class Orchestrator:
                 f"Recovering the confirmed commit for {session.data['taskId']}", "♻️ "
             )
             self._merge_and_cleanup(session)
+
+    def _base_branch_contains(self, session: Session, commit_sha: str) -> bool:
+        base_head = self.git.branch_head(session.data["baseBranch"])
+        return self.git.is_ancestor(commit_sha, base_head)
 
     def _current_work(self) -> Tuple[Optional[Session], Optional[Manifest], Optional[Task]]:
         sessions = self._active_sessions()
@@ -235,6 +252,7 @@ class Orchestrator:
             raise ConfigError(f"Cannot process {task.id} from state {task.status}")
 
     def _planner(self, session: Session, manifest: Manifest, task: Task) -> None:
+        previous_status = task.status
         if not self._begin_attempt(task, "planning", manifest):
             return
         task.status = "planning"
@@ -243,6 +261,11 @@ class Orchestrator:
             with self.ui.step("🧠", f"Planner · {task.id}"):
                 result = self._run_role(session, task, "planner", [f"{task.task_dir}/plan.md"])
             self._require_artifact(session, task, "plan.md")
+        except AgentInfrastructureError as error:
+            self._infrastructure_failure(
+                task, "planning", previous_status, manifest, error
+            )
+            raise
         except AgentError as error:
             self._role_failure(task, "planning", "needs_replan", manifest, error)
             return
@@ -263,6 +286,7 @@ class Orchestrator:
         self.journal.record("planner_finished", taskId=task.id, status=status)
 
     def _implementer(self, session: Session, manifest: Manifest, task: Task) -> None:
+        previous_status = task.status
         if not self._begin_attempt(task, "implementation", manifest):
             return
         task.status = "implementing"
@@ -273,6 +297,11 @@ class Orchestrator:
             with self.ui.step("🛠️ ", f"Implementer · {task.id}"):
                 result = self._run_role(session, task, "implementer", allowed, context)
             self._require_artifact(session, task, "progress.md")
+        except AgentInfrastructureError as error:
+            self._infrastructure_failure(
+                task, "implementation", previous_status, manifest, error
+            )
+            raise
         except AgentError as error:
             self._role_failure(task, "implementation", "needs_changes", manifest, error)
             return
@@ -310,6 +339,7 @@ class Orchestrator:
             return
         if not self._begin_attempt(task, "review", manifest):
             return
+        previous_status = task.status
         allowed = [f"{task.task_dir}/review.md"]
         try:
             with self.ui.step("🔍", f"Reviewer · {task.id}"):
@@ -321,6 +351,11 @@ class Orchestrator:
                     "Review the current uncommitted diff. Deterministic gates passed immediately before this review.",
                 )
             self._require_artifact(session, task, "review.md")
+        except AgentInfrastructureError as error:
+            self._infrastructure_failure(
+                task, "review", previous_status, manifest, error
+            )
+            raise
         except AgentError as error:
             self._role_failure(task, "review", "in_review", manifest, error)
             return
@@ -378,6 +413,27 @@ class Orchestrator:
         )
         self.ui.warning(str(error))
 
+    def _infrastructure_failure(
+        self,
+        task: Task,
+        stage: str,
+        retry_status: str,
+        manifest: Manifest,
+        error: AgentInfrastructureError,
+    ) -> None:
+        task.decrement(stage)
+        task.status = retry_status
+        task.raw["lastFailure"] = str(error)
+        manifest.save()
+        self.journal.record(
+            "agent_infrastructure_failed",
+            taskId=task.id,
+            stage=stage,
+            error=str(error),
+            nextStatus=task.status,
+        )
+        self.ui.warning(str(error))
+
     def _run_role(
         self,
         session: Session,
@@ -403,6 +459,7 @@ class Orchestrator:
         self.ui.detail(
             f"Model: {model} · reasoning: {reasoning_effort}{escalation_note}"
         )
+        before_head = self.git.head(worktree)
         before = self.git.file_snapshot(worktree)
         caught: Optional[Exception] = None
         result: Optional[Dict[str, Any]] = None
@@ -412,6 +469,11 @@ class Orchestrator:
         except Exception as error:  # scope must still be checked after an agent failure
             caught = error
         after = self.git.file_snapshot(worktree)
+        after_head = self.git.head(worktree)
+        if after_head != before_head:
+            raise ScopeError(
+                f"Role {role} changed worktree HEAD from {before_head} to {after_head}"
+            )
         changed = self.git.changed_since(before, after)
         artifact_name = {
             "planner": "plan.md",
@@ -477,6 +539,7 @@ class Orchestrator:
         worktree = Path(session.data["worktree"])
         sequence = session.next_sequence()
         log_dir = session.path.parent / "gates" / f"{sequence:03d}"
+        before_head = self.git.head(worktree)
         before = self.git.file_snapshot(worktree)
         caught: Optional[Exception] = None
         results = []
@@ -485,6 +548,11 @@ class Orchestrator:
         except Exception as error:
             caught = error
         after = self.git.file_snapshot(worktree)
+        after_head = self.git.head(worktree)
+        if after_head != before_head:
+            raise ScopeError(
+                f"Quality gate changed worktree HEAD from {before_head} to {after_head}"
+            )
         changed = self.git.changed_since(before, after)
         if changed:
             raise ScopeError(
@@ -516,23 +584,50 @@ class Orchestrator:
 
     def _complete(self, session: Session, manifest: Manifest, task: Task) -> None:
         worktree = Path(session.data["worktree"])
+        branch_head = self.git.head(worktree)
+        if branch_head != session.data["baseSha"]:
+            raise GitError(
+                f"Task branch HEAD is {branch_head}; expected unchanged base "
+                f"{session.data['baseSha']} before finalization"
+            )
         manifest.promote_dependencies()
         manifest.save()
-        administrative = [
-            self.manifest_relative,
-            f"{task.task_dir}/plan.md",
-            f"{task.task_dir}/progress.md",
-            f"{task.task_dir}/review.md",
-        ]
+        administrative = self._administrative_paths(task)
         changed = self.git.changed_paths(worktree)
         self.git.assert_scope(changed, [*task.allowed_paths, *administrative], "finalizer")
         with self.ui.step("📦", "Creating an atomic task commit"):
             commit_sha = self.git.commit_all(worktree, f"{task.id}: {task.title}")
+            self._validate_task_commit(session, task, commit_sha, worktree)
             session.data["commitSha"] = commit_sha
             session.save()
             self.journal.record("commit_confirmed", taskId=task.id, commitSha=commit_sha)
         self._merge_and_cleanup(session)
         self.ui.success(f"{task.id} completed · {commit_sha[:8]}")
+
+    def _validate_task_commit(
+        self, session: Session, task: Task, commit_sha: str, worktree: Path
+    ) -> None:
+        commit_parent = self.git.commit_parent(commit_sha, worktree)
+        if commit_parent != session.data["baseSha"]:
+            raise GitError(
+                f"Final commit parent is {commit_parent}; expected {session.data['baseSha']}"
+            )
+        committed_paths = self.git.committed_paths(
+            session.data["baseSha"], commit_sha, worktree
+        )
+        self.git.assert_scope(
+            committed_paths,
+            [*task.allowed_paths, *self._administrative_paths(task)],
+            "final commit",
+        )
+
+    def _administrative_paths(self, task: Task) -> List[str]:
+        return [
+            self.manifest_relative,
+            f"{task.task_dir}/plan.md",
+            f"{task.task_dir}/progress.md",
+            f"{task.task_dir}/review.md",
+        ]
 
     def _merge_and_cleanup(self, session: Session) -> None:
         commit_sha = session.data.get("commitSha")

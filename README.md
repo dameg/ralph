@@ -189,15 +189,24 @@ run `ralph run` again.
 - The planner may modify only `plan.md`, the reviewer only `review.md`, and the
   implementer only `progress.md` plus paths allowed by the task contract.
 - Any out-of-scope modification stops the workflow immediately.
+- Role processes and quality gates cannot create commits or move the task
+  branch. Finalization requires exactly one orchestrator-owned commit whose
+  parent is the recorded base SHA.
 - Quality gates run without a shell, with a timeout and fixed `TZ`, locale, and
   `PYTHONHASHSEED` values.
 - Agent network access is disabled by default. It can be enabled explicitly in
   `.ralph/config.json` when a task genuinely requires it.
 - The same quality gates run immediately before review and again after `PASS`.
 - The journal can recover a commit when execution stops between commit creation
-  and fast-forward.
+  and fast-forward, and can finish cleanup when execution stops after the
+  fast-forward.
 - The primary worktree must stay clean and its HEAD cannot change while a task
   is running.
+
+Agent process failures such as timeouts, startup failures, or non-zero CLI exits
+stop the run without consuming a planning, implementation, or review attempt.
+Invalid role results still consume an attempt because they are semantic
+failures rather than infrastructure failures.
 
 ## Clean terminal output ✨
 

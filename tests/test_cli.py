@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from ralph_loop.cli import _with_prd_override, parser
+from ralph_loop.config import Config
 from ralph_loop.errors import ConfigError
 
 
@@ -108,6 +109,27 @@ class CliTests(unittest.TestCase):
         self.assertEqual(repo.config.prd_path, (repo.root / "docs" / "prd.md").resolve())
         with self.assertRaisesRegex(ConfigError, "PRD not found"):
             _with_prd_override(repo.config, "docs/prds/missing.md")
+
+    def test_security_booleans_reject_string_values(self):
+        import json
+
+        from tests.helpers import Repo
+
+        for section, field in (
+            ("agent", "networkAccess"),
+            ("git", "keepBranches"),
+        ):
+            with self.subTest(field=field):
+                repo = Repo()
+                try:
+                    path = repo.root / ".ralph" / "config.json"
+                    config = json.loads(path.read_text(encoding="utf-8"))
+                    config[section][field] = "false"
+                    path.write_text(json.dumps(config), encoding="utf-8")
+                    with self.assertRaisesRegex(ConfigError, "must be a boolean"):
+                        Config.load(repo.root)
+                finally:
+                    repo.close()
 
 
 if __name__ == "__main__":
