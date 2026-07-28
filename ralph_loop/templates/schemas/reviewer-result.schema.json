@@ -38,25 +38,5 @@
       }
     }
   },
-  "allOf": [
-    {
-      "if": {
-        "properties": {"status": {"const": "FAIL"}},
-        "required": ["status"]
-      },
-      "then": {
-        "properties": {
-          "findings": {
-            "contains": {
-              "type": "object",
-              "properties": {"status": {"const": "open"}},
-              "required": ["status"]
-            },
-            "minContains": 1
-          }
-        }
-      }
-    }
-  ],
   "required": ["status", "summary", "acceptanceCriteria", "findings"]
 }

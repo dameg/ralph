@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,14 @@ from ralph_loop.errors import ConfigError
 
 
 class CliTests(unittest.TestCase):
+    def test_reviewer_schema_avoids_unsupported_composition(self):
+        schema_path = (
+            Path(__file__).resolve().parents[1]
+            / "ralph_loop/templates/schemas/reviewer-result.schema.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        self.assertNotIn("allOf", schema)
+
     def test_init_and_status_on_fresh_repository(self):
         source = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
@@ -45,8 +54,6 @@ class CliTests(unittest.TestCase):
             self.assertTrue(
                 (root / ".ralph" / "schemas" / "reviewer-result.schema.json").is_file()
             )
-            import json
-
             config = json.loads(
                 (root / ".ralph" / "config.json").read_text(encoding="utf-8")
             )
@@ -127,8 +134,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual((extend.task_id, extend.cycles), ("TASK-001", 1))
 
     def test_config_v1_is_rejected(self):
-        import json
-
         from ralph_loop.config import Config
         from tests.helpers import Repo
 
@@ -142,8 +147,6 @@ class CliTests(unittest.TestCase):
             Config.load(repo.root)
 
     def test_session_v1_is_rejected(self):
-        import json
-
         from ralph_loop.journal import Session
 
         with tempfile.TemporaryDirectory() as directory:
