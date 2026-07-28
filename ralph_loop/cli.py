@@ -15,10 +15,11 @@ from . import __version__
 from .config import Config, DEFAULT_CONFIG
 from .errors import ConfigError, RalphError
 from .git import Git
+from .journal import Session
 from .manifest import Manifest, blank_manifest
 from .orchestrator import Orchestrator
 from .ui import UI
-from .util import atomic_write_json, read_json, relative_path
+from .util import atomic_write_json, relative_path
 
 
 def parser() -> argparse.ArgumentParser:
@@ -40,7 +41,7 @@ def parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Use this PRD for this run without changing .ralph/config.json",
     )
-    run.add_argument("--max-iterations", type=int)
+    run.add_argument("--max-cycles", type=int)
     run.add_argument("--verbose", action="store_true")
     run.add_argument("--color", choices=("auto", "always", "never"))
 
@@ -49,6 +50,23 @@ def parser() -> argparse.ArgumentParser:
 
     doctor = subcommands.add_parser("doctor", help="Check configuration and prerequisites")
     doctor.add_argument("--color", choices=("auto", "always", "never"))
+
+    retry = subcommands.add_parser("retry", help="Grant operational retries after intervention")
+    retry.add_argument("task_id")
+    retry.add_argument(
+        "--stage",
+        required=True,
+        choices=("planning", "implementation", "gates", "review", "final-gates"),
+    )
+    retry.add_argument("--attempts", required=True, type=int)
+    retry.add_argument("--prd", metavar="PATH")
+    retry.add_argument("--color", choices=("auto", "always", "never"))
+
+    extend = subcommands.add_parser("extend", help="Extend a task cycle budget")
+    extend.add_argument("task_id")
+    extend.add_argument("--cycles", required=True, type=int)
+    extend.add_argument("--prd", metavar="PATH")
+    extend.add_argument("--color", choices=("auto", "always", "never"))
     return result
 
 
@@ -68,15 +86,23 @@ def main(arguments: Optional[List[str]] = None) -> int:
         color = args.color or config.color
         ui = UI(color=color, verbose=getattr(args, "verbose", False))
         if args.command == "run":
-            if args.max_iterations is not None and args.max_iterations < 1:
-                raise ConfigError("--max-iterations must be positive")
+            if args.max_cycles is not None and args.max_cycles < 1:
+                raise ConfigError("--max-cycles must be positive")
             if args.prd:
                 config = _with_prd_override(config, args.prd)
-            return Orchestrator(config, ui).run(args.max_iterations)
+            return Orchestrator(config, ui).run(args.max_cycles)
         if args.command == "status":
             return _status(config, ui)
         if args.command == "doctor":
             return _doctor(config, ui)
+        if args.command == "retry":
+            if args.prd:
+                config = _with_prd_override(config, args.prd)
+            return Orchestrator(config, ui).retry(args.task_id, args.stage, args.attempts)
+        if args.command == "extend":
+            if args.prd:
+                config = _with_prd_override(config, args.prd)
+            return Orchestrator(config, ui).extend(args.task_id, args.cycles)
     except (RalphError, OSError, ValueError, json.JSONDecodeError) as error:
         ui = locals().get("ui", UI(color="never"))
         ui.error(str(error))
@@ -140,7 +166,7 @@ def _init(root: Path, manifest_value: str, prd_value: str, force: bool, ui: UI) 
             "# Product requirements document\n\nTODO: describe the module scope before adding tasks.\n",
             encoding="utf-8",
         )
-    ui.banner("RALPH LOOP v3", "initialization complete")
+    ui.banner("RALPH LOOP v4", "initialization complete")
     ui.success(f"Configuration: {relative_path(root, config_path)}")
     ui.info(f"Manifest: {relative_path(root, manifest_path)}", "📋")
     ui.info(f"PRD: {relative_path(root, prd_path)}", "📝")
@@ -167,7 +193,7 @@ def _active_manifest(config: Config) -> tuple[Manifest, Optional[Dict[str, Any]]
     active: List[Dict[str, Any]] = []
     if session_root.exists():
         for state_path in sorted(session_root.glob("*/state.json")):
-            data = read_json(state_path)
+            data = Session.load(state_path).data
             if data.get("active"):
                 active.append(data)
     if len(active) > 1:
@@ -187,6 +213,12 @@ def _status(config: Config, ui: UI) -> int:
             f"Active: {session['taskId']} · {session['branch']}",
             "🔄",
         )
+        capacity = int(session["cycleLimit"]) + int(session.get("cycleGrants", 0))
+        pending = "yes" if session.get("pendingReview") else "no"
+        ui.info(
+            f"Cycles: {session.get('cyclesUsed', 0)}/{capacity} · pending review: {pending}",
+            "🔁",
+        )
     else:
         ui.info("No active session", "💤")
     if not manifest.tasks:
@@ -195,17 +227,21 @@ def _status(config: Config, ui: UI) -> int:
         for task in manifest.tasks:
             icon = {
                 "completed": "✅",
-                "failed": "❌",
                 "blocked": "⛔",
+                "needs_intervention": "🛟",
                 "ready": "🟢",
             }.get(task.status, "🔄")
             print(f"{icon} {task.id:<12} {task.status:<14} {task.title}")
+            intervention = task.raw.get("intervention")
+            if intervention:
+                for action in intervention.get("nextActions", []):
+                    print("   next: " + " ".join(action))
     counts = manifest.counts()
     ui.summary(
         counts.get("completed", 0),
         len(manifest.tasks),
         counts.get("blocked", 0),
-        counts.get("failed", 0),
+        counts.get("needs_intervention", 0),
     )
     return 0
 

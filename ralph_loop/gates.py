@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
-from .errors import GateError
+from .errors import GateFailure, GateInfrastructureError
 from .manifest import Task
 from .ui import UI
 from .util import stable_env
@@ -36,6 +36,7 @@ class GateRunner:
             log_path = log_dir / f"{index:02d}-{_safe_name(name)}.log"
             with self.ui.step("🧪", f"Quality gate: {name}"):
                 started = time.monotonic()
+                infrastructure_error = False
                 try:
                     result = subprocess.run(
                         command,
@@ -52,9 +53,11 @@ class GateRunner:
                 except subprocess.TimeoutExpired as error:
                     output = _timeout_output(error)
                     exit_code = 124
+                    infrastructure_error = True
                 except OSError as error:
                     output = str(error)
                     exit_code = 127
+                    infrastructure_error = True
                 elapsed = time.monotonic() - started
                 log_path.write_text(
                     f"$ {shlex.join(command)}\n\n{output}\n\nexit_code={exit_code}\n",
@@ -63,9 +66,13 @@ class GateRunner:
                 gate_result = GateResult(name, command, exit_code, elapsed, log_path)
                 results.append(gate_result)
                 if exit_code != 0:
-                    raise GateError(
-                        f"Quality gate '{name}' failed with exit code {exit_code}; log: {log_path}"
+                    message = (
+                        f"Quality gate '{name}' failed with exit code {exit_code}; "
+                        f"log: {log_path}"
                     )
+                    if infrastructure_error:
+                        raise GateInfrastructureError(message)
+                    raise GateFailure(message)
         return results
 
 

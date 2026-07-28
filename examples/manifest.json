@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "workflow": "planner-implementer-reviewer",
   "taskWorkspace": "docs/tasks/example-module",
   "tasks": [
@@ -31,15 +31,8 @@
           "timeoutSeconds": 300
         }
       ],
-      "attempts": {
-        "planning": 0,
-        "implementation": 0,
-        "review": 0
-      },
       "limits": {
-        "planning": 2,
-        "implementation": 5,
-        "review": 3
+        "cycles": 5
       }
     }
   ]

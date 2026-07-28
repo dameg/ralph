@@ -66,7 +66,8 @@ class Config:
     manifest_path: Path
     prd_path: Path
     runtime_path: Path
-    max_iterations: int
+    max_cycles_per_run: int
+    technical_retries: int
     color: str
     agent: AgentConfig
     git: GitConfig
@@ -84,8 +85,8 @@ class Config:
                 raw = json.load(handle)
         except (OSError, json.JSONDecodeError) as error:
             raise ConfigError(f"Cannot read {config_path}: {error}") from error
-        if not isinstance(raw, dict) or raw.get("version") != 1:
-            raise ConfigError("Configuration must be a JSON object with version=1")
+        if not isinstance(raw, dict) or raw.get("version") != 2:
+            raise ConfigError("Configuration must be a JSON object with version=2")
 
         def resolve(value: Any, label: str) -> Path:
             if not isinstance(value, str) or not value:
@@ -109,11 +110,17 @@ class Config:
         if sandbox not in {"read-only", "workspace-write"}:
             raise ConfigError("agent.sandbox must be read-only or workspace-write")
         timeout = agent_raw.get("timeoutSeconds", 1800)
-        max_iterations = raw.get("maxIterations", 30)
+        max_cycles_per_run = raw.get("maxCyclesPerRun", 30)
+        retry_raw = raw.get("retryPolicy")
         if not isinstance(timeout, int) or timeout < 1:
             raise ConfigError("agent.timeoutSeconds must be a positive integer")
-        if not isinstance(max_iterations, int) or max_iterations < 1:
-            raise ConfigError("maxIterations must be a positive integer")
+        if not isinstance(max_cycles_per_run, int) or max_cycles_per_run < 1:
+            raise ConfigError("maxCyclesPerRun must be a positive integer")
+        if not isinstance(retry_raw, dict):
+            raise ConfigError("retryPolicy must be a JSON object")
+        technical_retries = retry_raw.get("technicalRetries")
+        if not isinstance(technical_retries, int) or technical_retries < 0:
+            raise ConfigError("retryPolicy.technicalRetries cannot be negative")
         color = raw.get("ui", {}).get("color", "auto") if isinstance(raw.get("ui", {}), dict) else "auto"
         if color not in {"auto", "always", "never"}:
             raise ConfigError("ui.color must be auto, always, or never")
@@ -131,7 +138,8 @@ class Config:
             manifest_path=resolve(raw.get("manifest"), "manifest"),
             prd_path=resolve(raw.get("prd"), "prd"),
             runtime_path=resolve(raw.get("runtime", ".ralph/runtime"), "runtime"),
-            max_iterations=max_iterations,
+            max_cycles_per_run=max_cycles_per_run,
+            technical_retries=technical_retries,
             color=color,
             agent=AgentConfig(
                 command=command,
@@ -149,11 +157,12 @@ class Config:
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "version": 1,
+    "version": 2,
     "manifest": "docs/tasks/manifest.json",
     "prd": "docs/prd.md",
     "runtime": ".ralph/runtime",
-    "maxIterations": 30,
+    "maxCyclesPerRun": 30,
+    "retryPolicy": {"technicalRetries": 3},
     "agent": {
         "command": ["codex", "exec"],
         "sandbox": "workspace-write",
