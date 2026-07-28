@@ -50,6 +50,9 @@ class CliTests(unittest.TestCase):
             config = json.loads(
                 (root / ".ralph" / "config.json").read_text(encoding="utf-8")
             )
+            self.assertEqual(config["version"], 2)
+            self.assertEqual(config["maxCyclesPerRun"], 30)
+            self.assertEqual(config["retryPolicy"]["technicalRetries"], 3)
             self.assertEqual(
                 config["agent"]["roles"]["planner"]["model"],
                 "gpt-5.6-terra",
@@ -65,6 +68,10 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertIn("The manifest contains no tasks", status.stdout)
+            manifest = json.loads(
+                (root / "docs/tasks/module/manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["version"], 4)
 
     def test_default_role_models_escalate_after_retries(self):
         from tests.helpers import Repo
@@ -108,6 +115,42 @@ class CliTests(unittest.TestCase):
         self.assertEqual(repo.config.prd_path, (repo.root / "docs" / "prd.md").resolve())
         with self.assertRaisesRegex(ConfigError, "PRD not found"):
             _with_prd_override(repo.config, "docs/prds/missing.md")
+
+    def test_v4_cli_uses_cycle_and_intervention_commands(self):
+        run_args = parser().parse_args(["run", "--max-cycles", "7"])
+        self.assertEqual(run_args.max_cycles, 7)
+        retry = parser().parse_args(
+            ["retry", "TASK-001", "--stage", "review", "--attempts", "2"]
+        )
+        self.assertEqual((retry.task_id, retry.stage, retry.attempts), ("TASK-001", "review", 2))
+        extend = parser().parse_args(["extend", "TASK-001", "--cycles", "1"])
+        self.assertEqual((extend.task_id, extend.cycles), ("TASK-001", 1))
+
+    def test_config_v1_is_rejected(self):
+        import json
+
+        from ralph_loop.config import Config
+        from tests.helpers import Repo
+
+        repo = Repo()
+        self.addCleanup(repo.close)
+        path = repo.root / ".ralph/config.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["version"] = 1
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(ConfigError, "version=2"):
+            Config.load(repo.root)
+
+    def test_session_v1_is_rejected(self):
+        import json
+
+        from ralph_loop.journal import Session
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            path.write_text(json.dumps({"version": 1}), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "version=2"):
+                Session.load(path)
 
 
 if __name__ == "__main__":

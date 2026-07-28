@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Protocol
 
 from .config import Config
-from .errors import AgentError
+from .errors import AgentContractError, AgentError, AgentInfrastructureError
 from .manifest import Task
 from .util import relative_path, stable_env
 
@@ -32,6 +32,7 @@ class Agent(Protocol):
         result_path: Path,
         log_path: Path,
         context: str = "",
+        invocation: int = 1,
     ) -> Dict[str, Any]:
         ...
 
@@ -48,6 +49,7 @@ class CodexAgent:
         result_path: Path,
         log_path: Path,
         context: str = "",
+        invocation: int = 1,
     ) -> Dict[str, Any]:
         prompt_path = root / ".ralph" / "prompts" / f"{role}.md"
         schema_path = root / ".ralph" / "schemas" / f"{role}-result.schema.json"
@@ -58,14 +60,7 @@ class CodexAgent:
 
         result_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        stage = {
-            "planner": "planning",
-            "implementer": "implementation",
-            "reviewer": "review",
-        }[role]
-        model, reasoning_effort, _ = self.config.agent.model_for(
-            role, task.attempts(stage)
-        )
+        model, reasoning_effort, _ = self.config.agent.model_for(role, invocation)
         command = [
             *self.config.agent.command,
             "--ephemeral",
@@ -103,22 +98,24 @@ class CodexAgent:
                     check=False,
                 )
         except subprocess.TimeoutExpired as error:
-            raise AgentError(
+            raise AgentInfrastructureError(
                 f"Role {role} exceeded the {self.config.agent.timeout_seconds}s timeout; log: {log_path}"
             ) from error
         except OSError as error:
-            raise AgentError(f"Cannot start the agent: {error}") from error
+            raise AgentInfrastructureError(f"Cannot start the agent: {error}") from error
         if result.returncode != 0:
-            raise AgentError(
+            raise AgentInfrastructureError(
                 f"Role {role} exited with code {result.returncode}; log: {log_path}"
             )
         if not result_path.is_file():
-            raise AgentError(f"Role {role} did not return a JSON result; log: {log_path}")
+            raise AgentContractError(f"Role {role} did not return a JSON result; log: {log_path}")
         try:
             with result_path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
         except (OSError, json.JSONDecodeError) as error:
-            raise AgentError(f"Invalid JSON from role {role}: {error}; log: {log_path}") from error
+            raise AgentContractError(
+                f"Invalid JSON from role {role}: {error}; log: {log_path}"
+            ) from error
         validate_role_result(role, payload, task)
         return payload
 
@@ -168,58 +165,62 @@ Additional recovery context:
 
 def validate_role_result(role: str, payload: Any, task: Task) -> None:
     if role not in ROLE_STATUSES:
-        raise AgentError(f"Unknown role: {role}")
+        raise AgentContractError(f"Unknown role: {role}")
     if not isinstance(payload, dict):
-        raise AgentError(f"The {role} result must be a JSON object")
+        raise AgentContractError(f"The {role} result must be a JSON object")
     status = payload.get("status")
     if status not in ROLE_STATUSES[role]:
         expected = ", ".join(sorted(ROLE_STATUSES[role]))
-        raise AgentError(f"Role {role} returned status {status!r}; expected: {expected}")
+        raise AgentContractError(f"Role {role} returned status {status!r}; expected: {expected}")
     if not isinstance(payload.get("summary"), str) or not payload["summary"].strip():
-        raise AgentError(f"Role {role} must return a non-empty summary")
+        raise AgentContractError(f"Role {role} must return a non-empty summary")
     if role in {"implementer", "reviewer"}:
         evidence = payload.get("acceptanceCriteria")
         if not isinstance(evidence, list):
-            raise AgentError(f"Role {role} must evaluate acceptanceCriteria")
+            raise AgentContractError(f"Role {role} must evaluate acceptanceCriteria")
         by_id: Dict[str, Mapping[str, Any]] = {}
         for item in evidence:
             if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-                raise AgentError(f"Role {role} returned an invalid acceptanceCriteria entry")
+                raise AgentContractError(f"Role {role} returned an invalid acceptanceCriteria entry")
             if item["id"] in by_id:
-                raise AgentError(f"Role {role} returned duplicate criterion {item['id']}")
+                raise AgentContractError(f"Role {role} returned duplicate criterion {item['id']}")
             by_id[item["id"]] = item
         missing = [criterion for criterion in task.acceptance_ids if criterion not in by_id]
         extra = sorted(set(by_id) - set(task.acceptance_ids))
         if missing or extra:
-            raise AgentError(
+            raise AgentContractError(
                 f"Role {role} returned an incomplete AC set; missing={missing}, extra={extra}"
             )
         for criterion_id, item in by_id.items():
             if item.get("status") not in {"PASS", "FAIL"}:
-                raise AgentError(f"{role}: {criterion_id} has an invalid status")
+                raise AgentContractError(f"{role}: {criterion_id} has an invalid status")
             if not isinstance(item.get("evidence"), str) or not item["evidence"].strip():
-                raise AgentError(f"{role}: {criterion_id} has no evidence")
+                raise AgentContractError(f"{role}: {criterion_id} has no evidence")
         if status in {"IMPLEMENTATION_COMPLETE", "PASS"}:
             failed = [key for key, item in by_id.items() if item.get("status") != "PASS"]
             if failed:
-                raise AgentError(f"Status {status} requires PASS for every AC; failed: {failed}")
+                raise AgentContractError(
+                    f"Status {status} requires PASS for every AC; failed: {failed}"
+                )
     if role == "reviewer":
         findings = payload.get("findings")
         if not isinstance(findings, list):
-            raise AgentError("Reviewer must return a findings array")
+            raise AgentContractError("Reviewer must return a findings array")
         ids = set()
         for finding in findings:
             if not isinstance(finding, dict):
-                raise AgentError("Reviewer returned an invalid finding")
+                raise AgentContractError("Reviewer returned an invalid finding")
             finding_id = finding.get("id")
             if not isinstance(finding_id, str) or not finding_id.startswith("REV-"):
-                raise AgentError("Every finding must have a stable REV-* identifier")
+                raise AgentContractError("Every finding must have a stable REV-* identifier")
             if finding_id in ids:
-                raise AgentError(f"Duplicate finding: {finding_id}")
+                raise AgentContractError(f"Duplicate finding: {finding_id}")
             ids.add(finding_id)
             if finding.get("severity") not in {"low", "medium", "high", "critical"}:
-                raise AgentError(f"{finding_id} has an invalid severity")
+                raise AgentContractError(f"{finding_id} has an invalid severity")
             if finding.get("status") not in {"open", "resolved"}:
-                raise AgentError(f"{finding_id} has an invalid status")
+                raise AgentContractError(f"{finding_id} has an invalid status")
         if status == "PASS" and any(item.get("status") == "open" for item in findings):
-            raise AgentError("Reviewer cannot return PASS with open findings")
+            raise AgentContractError("Reviewer cannot return PASS with open findings")
+        if status == "FAIL" and not any(item.get("status") == "open" for item in findings):
+            raise AgentContractError("Reviewer FAIL requires at least one open finding")

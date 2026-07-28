@@ -1,31 +1,49 @@
-# Ralph Loop v3 🤖
+# Ralph Loop v4 🤖
 
 [![CI](https://github.com/dameg/ralph/actions/workflows/ci.yml/badge.svg)](https://github.com/dameg/ralph/actions/workflows/ci.yml)
 
-A deterministic Codex orchestrator for implementing complete modules from a
-PRD. The model performs the creative work, while the orchestrator controls state
-transitions, file scope, validation, and finalization.
+A deterministic, cycle-based Codex orchestrator for implementing complete
+modules from a PRD. Models do the creative work; Ralph owns state transitions,
+scope enforcement, quality gates, review obligations, recovery, and Git
+finalization.
 
 ## Workflow
 
 ```text
 📋 task contract
    ↓
-🧠 Planner ──→ JSON result and file-scope validation
+🧠 Planner
    ↓
-🛠️  Implementer ──→ 🧪 deterministic quality gates
-   ↑                         ↓
-   └──── fixes ←──── 🔍 independent Reviewer
-                              ↓ PASS
-                   🧪 final quality gates
-                              ↓
-                   📦 commit → 🔗 fast-forward
+┌────────────── cycle (default limit: 5) ──────────────┐
+│ 🛠️ Implementer → 🧪 quality gates → 🔍 Reviewer     │
+└───────────────────────────┬──────────────────────────┘
+                            ├─ FAIL → next cycle
+                            ├─ NEEDS_REPLAN → Planner → next cycle
+                            └─ PASS → final gates → commit → fast-forward
 ```
 
-Every task runs on an isolated branch in a separate Git worktree. The primary
-branch moves forward only after `PASS`, another successful quality-gate run, and
-a confirmed commit. Role results, complete logs, and the append-only journal are
-stored under `.ralph/runtime/` and are never committed.
+Every valid, non-blocking implementer result creates a candidate and a durable
+review obligation. This includes `IN_PROGRESS`, `VERIFICATION_FAILED`, and
+candidates whose deterministic quality gates fail. A cycle cannot be abandoned
+because a separate review budget ran out: review has no independent business
+limit.
+
+Each task runs on an isolated branch in a separate Git worktree. The primary
+branch moves only after reviewer `PASS`, successful final gates, and a confirmed
+commit. Runtime state, results, logs, lineage, and the append-only journal live
+under `.ralph/runtime/` and are not committed.
+
+## Breaking changes
+
+Ralph v4 intentionally provides no backward compatibility:
+
+- configuration must use `version: 2`;
+- manifests must use `version: 4`;
+- old runtime sessions are rejected;
+- stage attempt limits, `maxIterations`, and `failed` no longer exist;
+- no migration or reset command is provided.
+
+Prepare or reset existing projects manually before running v4.
 
 ## Getting started
 
@@ -35,7 +53,7 @@ Requirements: Python 3.9+, Git, and an authenticated Codex CLI.
 ./ralph init --prd docs/my-module-prd.md \
   --manifest docs/tasks/my-module/manifest.json
 
-# Complete the PRD, manifest, and task.md, then commit the initial state.
+# Complete and commit the PRD, manifest, and task.md files.
 ./ralph doctor
 ./ralph status
 ./ralph run
@@ -48,170 +66,165 @@ python3 -m pip install -e .
 ralph run
 ```
 
-### Run a PRD generated from a conversation
+## Configuration v2
 
-Generate and save a PRD with your preferred tool, for example `to-prd` in
-Cursor, then point Ralph at it for that run:
-
-```bash
-./ralph run --prd docs/prds/checkout.md
-```
-
-The override is transient: it does not modify `.ralph/config.json`. It must be
-provided again when resuming an active task. Ralph records the selected PRD in
-the session and refuses a resume with a different one. The manifest and each
-`task.md` remain the implementation contract; a task-level `prd` field takes
-precedence when you are coordinating multiple PRDs.
-
-## Task contract
-
-A complete example is available in
-[`examples/manifest.json`](examples/manifest.json), with a task-description
-template in [`examples/task.md`](examples/task.md).
-
-Every task must define:
-
-- a stable identifier and dependencies;
-- explicit `AC-*` acceptance criteria;
-- `contract.allowedPaths`, which technically enforces the implementer's scope;
-- quality gates represented as argument arrays such as `["npm", "test"]`, with
-  no `sh -c` and no scripts extracted from Markdown;
-- separate attempt limits for planning, implementation, and review;
-- a task directory containing `task.md`.
-
-An optional task-level `prd` path overrides the default PRD from
-`.ralph/config.json`. This lets one manifest coordinate tasks generated from
-multiple PRDs.
-
-Statuses form an explicit state machine:
-
-```text
-ready → planning → planned → implementing → in_review → completed
-            ↑              ↖ needs_changes ↙       │
-            └──────── needs_replan ─────────────────┘
-```
-
-The `blocked` and `failed` states stop the session without merging partial code.
-The isolated branch and worktree remain available for inspection, and their
-locations are shown in the terminal.
-
-## Role-aware model routing
-
-Ralph uses an adaptive model profile for each role. Initial attempts use Terra
-to keep routine work efficient. Repeated attempts automatically escalate to Sol
-with higher reasoning effort:
-
-| Role | Initial profile | Escalation |
-|---|---|---|
-| Planner | `gpt-5.6-terra`, medium | Sol/high after 1 failed attempt |
-| Implementer | `gpt-5.6-terra`, medium | Sol/high after 2 failed attempts |
-| Reviewer | `gpt-5.6-terra`, high | Sol/high after 1 failed attempt |
-
-The defaults work even for configuration files created by earlier Ralph
-versions. Override them under `agent.roles` in `.ralph/config.json`:
+The generated `.ralph/config.json` includes:
 
 ```json
 {
-  "agent": {
-    "roles": {
-      "planner": {
-        "model": "gpt-5.6-terra",
-        "reasoningEffort": "medium",
-        "escalateAfterAttempts": 1,
-        "escalationModel": "gpt-5.6-sol",
-        "escalationReasoningEffort": "high"
-      }
-    }
+  "version": 2,
+  "manifest": "docs/tasks/manifest.json",
+  "prd": "docs/prd.md",
+  "runtime": ".ralph/runtime",
+  "maxCyclesPerRun": 30,
+  "retryPolicy": {
+    "technicalRetries": 3
   }
 }
 ```
 
-Use `ralph run --verbose` to see the selected model, reasoning effort, and
-whether the current attempt was escalated. The same data is written to the
-runtime journal.
+`maxCyclesPerRun` limits newly admitted cycles during one command. Once a cycle
+starts, Ralph always carries it through gates and review or into an actionable
+`needs_intervention` state. Override the run cap with:
 
-## Multiple PRDs in one queue
-
-Keep all PRDs and their tasks in one versioned manifest when they belong to the
-same repository:
-
-```text
-docs/
-├── prds/
-│   ├── 01-authentication.md
-│   ├── 02-billing.md
-│   └── 03-reporting.md
-└── tasks/product/
-    ├── manifest.json
-    ├── auth/AUTH-001-.../task.md
-    ├── billing/BILL-001-.../task.md
-    └── reporting/REPORT-001-.../task.md
+```bash
+ralph run --max-cycles 4
 ```
 
-Each task points to its source PRD:
+`technicalRetries: 3` means one initial invocation plus at most three automatic
+retries for each operation: planning, implementation, gates, review, and final
+gates. Technical failures do not consume task cycles.
+
+## Manifest v4
+
+A complete example is available in
+[`examples/manifest.json`](examples/manifest.json), with a task template in
+[`examples/task.md`](examples/task.md).
+
+Every task defines stable IDs, dependencies, explicit `AC-*` criteria, enforced
+allowed paths, deterministic quality gates, and one cycle limit. Omitting
+`limits` uses the default of five cycles:
 
 ```json
 {
-  "id": "BILL-001",
-  "prd": "docs/prds/02-billing.md",
-  "path": "billing/BILL-001-create-invoice-model",
-  "dependsOn": ["AUTH-003"]
+  "version": 4,
+  "workflow": "planner-implementer-reviewer",
+  "taskWorkspace": "docs/tasks/example-module",
+  "tasks": [
+    {
+      "id": "CORE-001",
+      "title": "Add the capability",
+      "status": "ready",
+      "path": "CORE-001-add-capability",
+      "dependsOn": [],
+      "contract": {
+        "acceptanceCriteria": [
+          {"id": "AC-001", "description": "Behavior is observable and tested"}
+        ],
+        "allowedPaths": ["src/**", "tests/**"],
+        "nonGoals": []
+      },
+      "qualityGates": [
+        {
+          "name": "tests",
+          "command": ["python3", "-m", "unittest", "discover", "-s", "tests"],
+          "timeoutSeconds": 300
+        }
+      ],
+      "limits": {"cycles": 5}
+    }
+  ]
 }
 ```
 
-Ralph selects the first executable task in manifest order and checks every
-dependency before starting it. To enforce strict module order, make the first
-task of the next PRD depend on the final integration task of the previous PRD:
-
-```text
-AUTH-001 → AUTH-002 → AUTH-003
-                         ↓
-BILL-001 → BILL-002 → BILL-003
-                         ↓
-REPORT-001 → REPORT-002
-```
-
-After committing the PRDs, task descriptions, and manifest, one command runs
-the complete queue:
+An optional task-level `prd` overrides the configured PRD. The transient run
+override remains available:
 
 ```bash
-ralph run
+ralph run --prd docs/prds/checkout.md
 ```
 
-If a task becomes blocked, Ralph does not silently skip into a later module when
-that module depends on it. Resolve the blocker in the preserved worktree, then
-run `ralph run` again.
+Use the same `--prd` when resuming that active session. Suggested recovery
+commands include it automatically.
+
+## State machine
+
+```text
+ready → planning → planned → implementing → verifying → in_review
+                    ↑                                  │
+                    ├──── needs_changes ←──── FAIL ────┤
+       needs_replan └──── NEEDS_REPLAN ────────────────┤
+                                                       ↓ PASS
+                                                  finalizing
+                                                       ↓
+                                                   completed
+```
+
+`blocked` represents dependencies or an explicit role blocker.
+`needs_intervention` preserves the active worktree and records a reason,
+resume stage, details, and exact next actions.
+
+## Review guarantees and lineage
+
+When the implementer returns a valid non-blocking result, Ralph atomically
+consumes a cycle and records a `pendingReview` containing:
+
+- the cycle and implementation run IDs;
+- the implementation status;
+- a digest of the reviewable diff;
+- deterministic gate status and evidence.
+
+Review can close that obligation only with a valid `PASS`, `FAIL`, or
+`NEEDS_REPLAN` for the same candidate digest. `PASS` is forbidden unless the
+implementation is complete, all acceptance evidence passes, gates pass, and no
+finding remains open.
+
+Lineage records which review led to an implementation and which subsequent
+review evaluated it. Existing `REV-*` findings must remain present as `open` or
+`resolved`. If two consecutive reviews return the same open finding IDs for an
+unchanged candidate digest, Ralph stops early with `no_progress`.
+
+## Intervention commands
+
+Operational retries and business-budget extensions are deliberately separate:
+
+```bash
+ralph retry CORE-003 --stage review --attempts 1
+ralph extend CORE-003 --cycles 1
+```
+
+`retry` grants additional invocations without changing the cycle budget.
+`extend` grants runtime-only cycles without modifying the manifest contract.
+Both require an active task in `needs_intervention`, validate the requested
+stage, and append an audit event to the journal.
+
+Scope violations and externally changed candidates must be repaired manually in
+the preserved worktree before retry is accepted.
+
+## Role-aware model routing
+
+Initial invocations use Terra; repeated invocations can escalate to Sol. Routing
+uses actual role invocation numbers rather than consumed cycles, so invalid
+responses can escalate without exhausting business budget. Override profiles
+under `agent.roles` in `.ralph/config.json`.
+
+Use `ralph run --verbose` to see cycle usage, model selection, reasoning effort,
+and escalation. `ralph status` shows active cycles, pending review, intervention
+details, and suggested actions.
 
 ## Determinism and safety
 
-- Every role result is checked against a JSON Schema and then validated for
-  complete evidence covering every `AC-*` criterion.
-- The planner may modify only `plan.md`, the reviewer only `review.md`, and the
-  implementer only `progress.md` plus paths allowed by the task contract.
-- Any out-of-scope modification stops the workflow immediately.
-- Quality gates run without a shell, with a timeout and fixed `TZ`, locale, and
-  `PYTHONHASHSEED` values.
-- Agent network access is disabled by default. It can be enabled explicitly in
-  `.ralph/config.json` when a task genuinely requires it.
-- The same quality gates run immediately before review and again after `PASS`.
-- The journal can recover a commit when execution stops between commit creation
-  and fast-forward.
-- The primary worktree must stay clean and its HEAD cannot change while a task
-  is running.
-
-## Clean terminal output ✨
-
-The default view displays only stages, results, elapsed time, and a log path on
-failure. Raw Codex and test output is stored in runtime files instead of flooding
-the terminal. `./ralph run --verbose` adds state and attempt counters, while
-`--color never` disables ANSI colors but keeps emoji.
-
-## Recovery
-
-Running `./ralph run` again automatically resumes the active worktree. If the
-process stopped after creating a commit but before fast-forwarding, Ralph finds
-the commit by SHA and completes the transaction. Blocked work is never merged
-into the primary branch.
+- Role JSON is schema-validated and checked for complete `AC-*` evidence.
+- Planner, implementer, and reviewer file scopes are enforced independently.
+- Quality gates run without a shell, with timeouts and a stable environment.
+- Deterministic gate failures still receive independent review.
+- Infrastructure failures retry the same operation without spending cycles.
+- Candidate digests exclude workflow artifacts but include code paths, content,
+  file type, and mode.
+- An exclusive runtime lock prevents concurrent `run`, `retry`, or `extend`
+  processes from mutating one session.
+- Session state is authoritative and reconciles the manifest after interruption.
+- Confirmed commits and fast-forwards remain recoverable after process failure.
 
 ## Testing Ralph
 
@@ -219,5 +232,6 @@ into the primary branch.
 python3 -m unittest discover -s tests -v
 ```
 
-The end-to-end test uses fake agents with real Git worktrees and commits, so the
-test suite protects the application factory itself, not only generated code.
+The end-to-end suite uses fake agents with real Git worktrees and commits. It
+covers mandatory review, cycle caps, technical retry, intervention, lineage,
+no-progress detection, strict v4 contracts, and finalization.

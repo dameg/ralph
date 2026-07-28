@@ -47,6 +47,21 @@ class AgentResultTests(unittest.TestCase):
                 self.task,
             )
 
+    def test_reviewer_fail_requires_an_open_finding(self):
+        with self.assertRaisesRegex(AgentError, "open finding"):
+            validate_role_result(
+                "reviewer",
+                {
+                    "status": "FAIL",
+                    "summary": "Rejected without actionable feedback",
+                    "acceptanceCriteria": [
+                        {"id": "AC-001", "status": "FAIL", "evidence": "missing"}
+                    ],
+                    "findings": [],
+                },
+                self.task,
+            )
+
     def test_prompt_uses_task_specific_prd(self):
         from tests.helpers import Repo
 
