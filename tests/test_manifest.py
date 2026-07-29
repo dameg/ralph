@@ -57,6 +57,34 @@ class ManifestTests(unittest.TestCase):
         manifest = Manifest.load(path, repo.root)
         self.assertEqual(manifest.get("TASK-001").raw["prd"], "docs/second-prd.md")
 
+    def test_manifest_v3_is_rejected(self):
+        repo = Repo()
+        self.addCleanup(repo.close)
+        import json
+
+        path = repo.config.manifest_path
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["version"] = 3
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(ConfigError, "version=4"):
+            Manifest.load(path, repo.root)
+
+    def test_stage_attempts_are_rejected(self):
+        task = task_payload()
+        task["attempts"] = {"planning": 0, "implementation": 0, "review": 0}
+        repo = Repo(task)
+        self.addCleanup(repo.close)
+        with self.assertRaisesRegex(ConfigError, "attempts is not supported"):
+            Manifest.load(repo.config.manifest_path, repo.root)
+
+    def test_cycle_limit_defaults_to_five(self):
+        task = task_payload()
+        task.pop("limits")
+        repo = Repo(task)
+        self.addCleanup(repo.close)
+        manifest = Manifest.load(repo.config.manifest_path, repo.root)
+        self.assertEqual(manifest.get("TASK-001").cycle_limit, 5)
+
 
 if __name__ == "__main__":
     unittest.main()

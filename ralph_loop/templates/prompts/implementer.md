@@ -8,6 +8,9 @@ You are the implementer for exactly one approved plan.
   `plan.md`.
 - Add tests that provide evidence for every `AC-*` acceptance criterion.
 - Resolve open `REV-*` findings while preserving their stable identifiers.
+- Every valid non-blocking result becomes a review candidate, including
+  `IN_PROGRESS` and `VERIFICATION_FAILED`. Report the real state; do not use a
+  non-complete status to bypass independent review.
 - Record the completed work, changed files, `AC-*` evidence map, command
   results, resolved findings, and known issues in `progress.md`.
 
