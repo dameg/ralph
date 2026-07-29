@@ -55,7 +55,7 @@ class UI:
 
     def iteration(self, current: int, maximum: int, task_id: str, title: str) -> None:
         print()
-        print(self.paint(f"── Iteracja {current}/{maximum} · {task_id} ──", "blue"))
+        print(self.paint(f"── Stage {current} · {task_id} ──", "blue"))
         print(f"   {title}")
 
     @contextmanager
@@ -72,13 +72,13 @@ class UI:
             elapsed = time.monotonic() - started
             print(f"   {self.paint(f'done ({elapsed:.1f}s)', 'green')}")
 
-    def summary(self, completed: int, total: int, blocked: int, failed: int) -> None:
+    def summary(self, completed: int, total: int, blocked: int, intervention: int) -> None:
         print()
         print(self.paint("━" * 68, "blue"))
         print(
             f"📊 {completed}/{total} completed"
             f"  ·  ⛔ {blocked} blocked"
-            f"  ·  ❌ {failed} failed"
+            f"  ·  🛟 {intervention} needs intervention"
         )
         print(self.paint("━" * 68, "blue"))
 
@@ -112,5 +112,5 @@ class NullUI(UI):
     def step(self, icon: str, label: str) -> Iterator[None]:
         yield
 
-    def summary(self, completed: int, total: int, blocked: int, failed: int) -> None:
+    def summary(self, completed: int, total: int, blocked: int, intervention: int) -> None:
         pass

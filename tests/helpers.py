@@ -44,8 +44,7 @@ def task_payload(**overrides: Any) -> Dict[str, Any]:
                 "timeoutSeconds": 30,
             }
         ],
-        "attempts": {"planning": 0, "implementation": 0, "review": 0},
-        "limits": {"planning": 2, "implementation": 3, "review": 2},
+        "limits": {"cycles": 3},
     }
     task.update(overrides)
     return task
@@ -62,11 +61,12 @@ class Repo:
         atomic_write_json(
             self.root / ".ralph" / "config.json",
             {
-                "version": 1,
+                "version": 2,
                 "manifest": "docs/tasks/module/manifest.json",
                 "prd": "docs/prd.md",
                 "runtime": ".ralph/runtime",
-                "maxIterations": 10,
+                "maxCyclesPerRun": 10,
+                "retryPolicy": {"technicalRetries": 3},
                 "agent": {
                     "command": ["codex", "exec"],
                     "sandbox": "workspace-write",
@@ -88,7 +88,7 @@ class Repo:
         atomic_write_json(
             self.root / "docs" / "tasks" / "module" / "manifest.json",
             {
-                "version": 3,
+                "version": 4,
                 "workflow": "planner-implementer-reviewer",
                 "taskWorkspace": "docs/tasks/module",
                 "tasks": [task or task_payload()],
@@ -106,7 +106,7 @@ class Repo:
 
 
 class SuccessfulAgent:
-    def run(self, role, task, root, result_path, log_path, context=""):
+    def run(self, role, task, root, result_path, log_path, context="", invocation=1):
         criteria = [{"id": "AC-001", "status": "PASS", "evidence": "verified"}]
         if role == "planner":
             (root / task.task_dir / "plan.md").write_text("# Plan\n\nREADY\n", encoding="utf-8")

@@ -14,12 +14,14 @@ EXECUTABLE_STATUSES = {
     "planning",
     "planned",
     "implementing",
+    "verifying",
     "needs_changes",
     "needs_replan",
     "in_review",
+    "finalizing",
 }
-ALL_STATUSES = EXECUTABLE_STATUSES | {"blocked", "failed", "completed"}
-STAGES = ("planning", "implementation", "review")
+ALL_STATUSES = EXECUTABLE_STATUSES | {"blocked", "needs_intervention", "completed"}
+DEFAULT_CYCLE_LIMIT = 5
 
 
 @dataclass
@@ -63,16 +65,9 @@ class Task:
     def gates(self) -> List[Dict[str, Any]]:
         return list(self.raw["qualityGates"])
 
-    def attempts(self, stage: str) -> int:
-        return int(self.raw.setdefault("attempts", {}).get(stage, 0))
-
-    def limit(self, stage: str) -> int:
-        return int(self.raw["limits"][stage])
-
-    def increment(self, stage: str) -> int:
-        attempts = self.raw.setdefault("attempts", {})
-        attempts[stage] = int(attempts.get(stage, 0)) + 1
-        return attempts[stage]
+    @property
+    def cycle_limit(self) -> int:
+        return int(self.raw["limits"]["cycles"])
 
     def decrement(self, stage: str) -> int:
         attempts = self.raw.setdefault("attempts", {})
@@ -110,8 +105,8 @@ class Manifest:
         atomic_write_json(self.path, self.raw)
 
     def validate(self, repo_root: Path) -> None:
-        if self.raw.get("version") != 3:
-            raise ConfigError("Manifest must use version=3")
+        if self.raw.get("version") != 4:
+            raise ConfigError("Manifest must use version=4")
         if self.raw.get("workflow") != "planner-implementer-reviewer":
             raise ConfigError("Manifest must use workflow=planner-implementer-reviewer")
         raw_tasks = self.raw.get("tasks")
@@ -168,9 +163,11 @@ class Manifest:
                 raise ConfigError(str(error)) from error
             if task_id in dependencies:
                 raise ConfigError(f"{task_id} cannot depend on itself")
+            if "limits" not in raw:
+                raw["limits"] = {"cycles": DEFAULT_CYCLE_LIMIT}
             self._validate_contract(raw, task_id)
             self._validate_gates(raw, task_id)
-            self._validate_attempts(raw, task_id)
+            self._validate_limits(raw, task_id)
 
         for task in self.tasks:
             missing = sorted(set(task.depends_on) - ids)
@@ -231,18 +228,14 @@ class Manifest:
             if not isinstance(timeout, int) or timeout < 1:
                 raise ConfigError(f"{task_id}.{gate['name']}.timeoutSeconds must be positive")
 
-    def _validate_attempts(self, raw: Dict[str, Any], task_id: str) -> None:
+    def _validate_limits(self, raw: Dict[str, Any], task_id: str) -> None:
         limits = raw.get("limits")
-        attempts = raw.get("attempts", {})
-        if not isinstance(limits, dict) or not isinstance(attempts, dict):
-            raise ConfigError(f"{task_id}.limits and attempts must be objects")
-        for stage in STAGES:
-            limit = limits.get(stage)
-            attempt = attempts.get(stage, 0)
-            if not isinstance(limit, int) or limit < 1:
-                raise ConfigError(f"{task_id}.limits.{stage} must be positive")
-            if not isinstance(attempt, int) or attempt < 0:
-                raise ConfigError(f"{task_id}.attempts.{stage} cannot be negative")
+        if not isinstance(limits, dict) or set(limits) != {"cycles"}:
+            raise ConfigError(f"{task_id}.limits must contain only cycles")
+        if not isinstance(limits["cycles"], int) or limits["cycles"] < 1:
+            raise ConfigError(f"{task_id}.limits.cycles must be positive")
+        if "attempts" in raw:
+            raise ConfigError(f"{task_id}.attempts is not supported in manifest v4")
 
     def _validate_acyclic(self) -> None:
         graph = {task.id: task.depends_on for task in self.tasks}
@@ -299,7 +292,7 @@ class Manifest:
 
 def blank_manifest(task_workspace: str) -> Dict[str, Any]:
     return {
-        "version": 3,
+        "version": 4,
         "workflow": "planner-implementer-reviewer",
         "taskWorkspace": task_workspace,
         "tasks": [],

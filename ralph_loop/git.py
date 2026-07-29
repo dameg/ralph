@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import subprocess
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set
@@ -149,6 +150,27 @@ class Git:
             else:
                 snapshot[path] = "<missing>"
         return snapshot
+
+    def candidate_digest(self, cwd: Path, allowed: Iterable[str]) -> str:
+        digest = hashlib.sha256()
+        for path in self.changed_paths(cwd):
+            if not matches_any(path, allowed):
+                continue
+            absolute = cwd / path
+            if absolute.is_symlink():
+                kind = "symlink"
+                mode = "symlink"
+                content = os.readlink(absolute)
+            elif absolute.is_file():
+                kind = "file"
+                mode = oct(absolute.stat().st_mode & 0o7777)
+                content = sha256_file(absolute)
+            else:
+                kind = "missing"
+                mode = "missing"
+                content = "missing"
+            digest.update(f"{path}\0{kind}\0{mode}\0{content}\n".encode("utf-8"))
+        return digest.hexdigest()
 
     @staticmethod
     def changed_since(before: Dict[str, str], after: Dict[str, str]) -> Set[str]:
