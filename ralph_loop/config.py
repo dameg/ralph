@@ -13,6 +13,16 @@ ROLES = ("planner", "implementer", "reviewer")
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 
 
+def _reject_unknown(value: Mapping[str, Any], allowed: set[str], label: str) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ConfigError(f"{label} contains unknown fields: {', '.join(unknown)}")
+
+
+def _is_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 @dataclass(frozen=True)
 class RoleModelConfig:
     model: str
@@ -85,12 +95,34 @@ class Config:
                 raw = json.load(handle)
         except (OSError, json.JSONDecodeError) as error:
             raise ConfigError(f"Cannot read {config_path}: {error}") from error
-        if not isinstance(raw, dict) or raw.get("version") != 2:
-            raise ConfigError("Configuration must be a JSON object with version=2")
+        if (
+            not isinstance(raw, dict)
+            or not _is_integer(raw.get("version"))
+            or raw.get("version") != 1
+        ):
+            raise ConfigError("Configuration must be a JSON object with version=1")
+        _reject_unknown(
+            raw,
+            {
+                "version",
+                "manifest",
+                "prd",
+                "runtime",
+                "maxCyclesPerRun",
+                "retryPolicy",
+                "agent",
+                "git",
+                "ui",
+            },
+            "configuration",
+        )
 
         def resolve(value: Any, label: str) -> Path:
             if not isinstance(value, str) or not value:
                 raise ConfigError(f"{label} must be a relative path")
+            supplied = Path(value)
+            if supplied.is_absolute() or value.startswith("~") or ".." in supplied.parts:
+                raise ConfigError(f"{label} must be a relative path inside the repository")
             candidate = (root / value).resolve()
             try:
                 candidate.relative_to(root)
@@ -102,6 +134,12 @@ class Config:
         git_raw = raw.get("git", {})
         if not isinstance(agent_raw, dict) or not isinstance(git_raw, dict):
             raise ConfigError("agent and git must be JSON objects")
+        _reject_unknown(
+            agent_raw,
+            {"command", "sandbox", "networkAccess", "timeoutSeconds", "model", "roles"},
+            "agent",
+        )
+        _reject_unknown(git_raw, {"branchPrefix", "keepBranches"}, "git")
         try:
             command = ensure_command(agent_raw.get("command", ["codex", "exec"]), "agent.command")
         except ValueError as error:
@@ -112,16 +150,21 @@ class Config:
         timeout = agent_raw.get("timeoutSeconds", 1800)
         max_cycles_per_run = raw.get("maxCyclesPerRun", 30)
         retry_raw = raw.get("retryPolicy")
-        if not isinstance(timeout, int) or timeout < 1:
+        if not _is_integer(timeout) or timeout < 1:
             raise ConfigError("agent.timeoutSeconds must be a positive integer")
-        if not isinstance(max_cycles_per_run, int) or max_cycles_per_run < 1:
+        if not _is_integer(max_cycles_per_run) or max_cycles_per_run < 1:
             raise ConfigError("maxCyclesPerRun must be a positive integer")
         if not isinstance(retry_raw, dict):
             raise ConfigError("retryPolicy must be a JSON object")
+        _reject_unknown(retry_raw, {"technicalRetries"}, "retryPolicy")
         technical_retries = retry_raw.get("technicalRetries")
-        if not isinstance(technical_retries, int) or technical_retries < 0:
+        if not _is_integer(technical_retries) or technical_retries < 0:
             raise ConfigError("retryPolicy.technicalRetries cannot be negative")
-        color = raw.get("ui", {}).get("color", "auto") if isinstance(raw.get("ui", {}), dict) else "auto"
+        ui_raw = raw.get("ui", {})
+        if not isinstance(ui_raw, dict):
+            raise ConfigError("ui must be a JSON object")
+        _reject_unknown(ui_raw, {"color"}, "ui")
+        color = ui_raw.get("color", "auto")
         if color not in {"auto", "always", "never"}:
             raise ConfigError("ui.color must be auto, always, or never")
         branch_prefix = git_raw.get("branchPrefix", "ralph/")
@@ -163,7 +206,7 @@ class Config:
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "version": 2,
+    "version": 1,
     "manifest": "docs/tasks/manifest.json",
     "prd": "docs/prd.md",
     "runtime": ".ralph/runtime",
@@ -224,6 +267,17 @@ def _load_role_models(value: Any, global_model: Optional[str]) -> Dict[str, Role
         raw = value.get(role, {})
         if not isinstance(raw, dict):
             raise ConfigError(f"agent.roles.{role} must be a JSON object")
+        _reject_unknown(
+            raw,
+            {
+                "model",
+                "reasoningEffort",
+                "escalateAfterAttempts",
+                "escalationModel",
+                "escalationReasoningEffort",
+            },
+            f"agent.roles.{role}",
+        )
         default = defaults[role]
         model = raw.get("model", global_model or default["model"])
         effort = raw.get("reasoningEffort", default["reasoningEffort"])
@@ -242,7 +296,7 @@ def _load_role_models(value: Any, global_model: Optional[str]) -> Dict[str, Role
                 + ", ".join(sorted(REASONING_EFFORTS))
             )
         if escalate_after is not None and (
-            not isinstance(escalate_after, int) or escalate_after < 1
+            not _is_integer(escalate_after) or escalate_after < 1
         ):
             raise ConfigError(
                 f"agent.roles.{role}.escalateAfterAttempts must be a positive integer"

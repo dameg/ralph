@@ -61,7 +61,7 @@ class Repo:
         atomic_write_json(
             self.root / ".ralph" / "config.json",
             {
-                "version": 2,
+                "version": 1,
                 "manifest": "docs/tasks/module/manifest.json",
                 "prd": "docs/prd.md",
                 "runtime": ".ralph/runtime",
@@ -88,8 +88,7 @@ class Repo:
         atomic_write_json(
             self.root / "docs" / "tasks" / "module" / "manifest.json",
             {
-                "version": 4,
-                "workflow": "planner-implementer-reviewer",
+                "version": 1,
                 "taskWorkspace": "docs/tasks/module",
                 "tasks": [task or task_payload()],
             },

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional
 
+from . import __version__
 from .errors import ConfigError, RuntimeBusyError
 from .util import atomic_write_json, read_json
 
@@ -124,7 +125,7 @@ class Journal:
         try:
             import fcntl
         except ImportError as error:  # pragma: no cover - Ralph targets POSIX worktrees
-            raise ConfigError("Ralph v4 requires POSIX runtime locking") from error
+            raise ConfigError("Ralph requires POSIX runtime locking") from error
         lock_path = self.runtime / "ralph.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+", encoding="utf-8") as handle:
@@ -185,13 +186,14 @@ class Session:
         session = cls(
             path,
             {
-                "version": 2,
+                "version": 1,
+                "ralphVersion": __version__,
                 "taskId": task_id,
                 "worktree": str(worktree),
                 "branch": branch,
                 "baseSha": base_sha,
                 "baseBranch": base_branch,
-                "prd": prd,
+                "effectivePrd": prd,
                 "commitSha": None,
                 "merged": False,
                 "active": True,
@@ -208,9 +210,9 @@ class Session:
                 "technicalFailures": {},
                 "manualRetries": {},
                 "intervention": None,
-                "resumeStatus": None,
                 "workflowStatus": initial_status,
                 "unconsumedRoleRun": None,
+                "recoveryContext": None,
             },
         )
         session.save()
@@ -219,8 +221,9 @@ class Session:
     @classmethod
     def load(cls, path: Path) -> "Session":
         session = cls(path, read_json(path))
-        if session.data.get("version") != 2:
-            raise ConfigError(f"Session must use version=2: {path}")
+        version = session.data.get("version")
+        if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+            raise ConfigError(f"Session must use version=1: {path}")
         return session
 
     def save(self) -> None:

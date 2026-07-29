@@ -40,6 +40,79 @@ class AgentResultTests(unittest.TestCase):
                         {
                             "id": "REV-001",
                             "severity": "high",
+                            "file": "src/value.txt",
+                            "description": "Value is wrong",
+                            "expectedBehavior": "Value should be correct",
+                            "status": "open",
+                        }
+                    ],
+                },
+                self.task,
+            )
+
+    def test_planner_requires_every_schema_field(self):
+        with self.assertRaisesRegex(AgentError, "filesPlanned"):
+            validate_role_result(
+                "planner",
+                {
+                    "status": "READY",
+                    "summary": "Ready",
+                    "verificationCommands": [],
+                },
+                self.task,
+            )
+
+    def test_implementer_rejects_unknown_fields(self):
+        with self.assertRaisesRegex(AgentError, "extra"):
+            validate_role_result(
+                "implementer",
+                {
+                    "status": "IMPLEMENTATION_COMPLETE",
+                    "summary": "Done",
+                    "changedFiles": ["src/value.txt"],
+                    "verification": [],
+                    "acceptanceCriteria": [
+                        {"id": "AC-001", "status": "PASS", "evidence": "test"}
+                    ],
+                    "unexpected": True,
+                },
+                self.task,
+            )
+
+    def test_implementer_verification_rejects_boolean_exit_code(self):
+        with self.assertRaisesRegex(AgentError, "exitCode"):
+            validate_role_result(
+                "implementer",
+                {
+                    "status": "IMPLEMENTATION_COMPLETE",
+                    "summary": "Done",
+                    "changedFiles": ["src/value.txt"],
+                    "verification": [
+                        {"command": ["python3", "-V"], "exitCode": True, "summary": "ok"}
+                    ],
+                    "acceptanceCriteria": [
+                        {"id": "AC-001", "status": "PASS", "evidence": "test"}
+                    ],
+                },
+                self.task,
+            )
+
+    def test_reviewer_requires_complete_finding_shape(self):
+        with self.assertRaisesRegex(AgentError, "description"):
+            validate_role_result(
+                "reviewer",
+                {
+                    "status": "FAIL",
+                    "summary": "Not accepted",
+                    "acceptanceCriteria": [
+                        {"id": "AC-001", "status": "FAIL", "evidence": "missing"}
+                    ],
+                    "findings": [
+                        {
+                            "id": "REV-001",
+                            "severity": "high",
+                            "file": "src/value.txt",
+                            "expectedBehavior": "Value should be correct",
                             "status": "open",
                         }
                     ],

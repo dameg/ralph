@@ -4,12 +4,12 @@ import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Protocol, Union
+from typing import Any, Dict, Mapping, Optional, Protocol, Union
 
 from .config import Config
 from .errors import AgentContractError, AgentError, AgentInfrastructureError
 from .manifest import Task
-from .util import relative_path, stable_env
+from .util import ensure_command, ensure_string_list, relative_path, stable_env
 
 
 ROLE_STATUSES = {
@@ -22,6 +22,30 @@ ROLE_STATUSES = {
     },
     "reviewer": {"PASS", "FAIL", "NEEDS_REPLAN"},
 }
+ROLE_FIELDS = {
+    "planner": {"status", "summary", "filesPlanned", "verificationCommands"},
+    "implementer": {
+        "status",
+        "summary",
+        "changedFiles",
+        "verification",
+        "acceptanceCriteria",
+    },
+    "reviewer": {"status", "summary", "acceptanceCriteria", "findings"},
+}
+
+
+def _require_fields(value: Mapping[str, Any], expected: set[str], label: str) -> None:
+    missing = sorted(expected - set(value))
+    extra = sorted(set(value) - expected)
+    if missing or extra:
+        raise AgentContractError(
+            f"{label} fields do not match the contract; missing={missing}, extra={extra}"
+        )
+
+
+def _is_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 @dataclass(frozen=True)
@@ -160,7 +184,7 @@ class CodexAgent:
             "reviewer": "You may modify only review.md in the task directory. Do not fix the code.",
         }
         default_prd = relative_path(self.config.root, self.config.prd_path)
-        prd_path = task.raw.get("prd", default_prd)
+        prd_path = task.effective_prd(default_prd)
         return f"""Follow all applicable AGENTS.md files.
 
 You are the {role} for exactly one task: {task.id} — {task.title}.
@@ -239,12 +263,56 @@ def validate_role_result(role: str, payload: Any, task: Task) -> None:
         raise AgentContractError(f"Unknown role: {role}")
     if not isinstance(payload, dict):
         raise AgentContractError(f"The {role} result must be a JSON object")
+    _require_fields(payload, ROLE_FIELDS[role], f"Role {role} result")
     status = payload.get("status")
     if status not in ROLE_STATUSES[role]:
         expected = ", ".join(sorted(ROLE_STATUSES[role]))
         raise AgentContractError(f"Role {role} returned status {status!r}; expected: {expected}")
     if not isinstance(payload.get("summary"), str) or not payload["summary"].strip():
         raise AgentContractError(f"Role {role} must return a non-empty summary")
+    if role == "planner":
+        try:
+            ensure_string_list(payload["filesPlanned"], "planner.filesPlanned")
+        except ValueError as error:
+            raise AgentContractError(str(error)) from error
+        commands = payload["verificationCommands"]
+        if not isinstance(commands, list):
+            raise AgentContractError("planner.verificationCommands must be an array")
+        for index, command in enumerate(commands):
+            try:
+                ensure_command(command, f"planner.verificationCommands[{index}]")
+            except ValueError as error:
+                raise AgentContractError(str(error)) from error
+    if role == "implementer":
+        try:
+            ensure_string_list(payload["changedFiles"], "implementer.changedFiles")
+        except ValueError as error:
+            raise AgentContractError(str(error)) from error
+        verification = payload["verification"]
+        if not isinstance(verification, list):
+            raise AgentContractError("implementer.verification must be an array")
+        for index, item in enumerate(verification):
+            if not isinstance(item, dict):
+                raise AgentContractError(
+                    f"implementer.verification[{index}] must be an object"
+                )
+            _require_fields(
+                item,
+                {"command", "exitCode", "summary"},
+                f"implementer.verification[{index}]",
+            )
+            try:
+                ensure_command(item["command"], f"implementer.verification[{index}].command")
+            except ValueError as error:
+                raise AgentContractError(str(error)) from error
+            if not _is_integer(item["exitCode"]):
+                raise AgentContractError(
+                    f"implementer.verification[{index}].exitCode must be an integer"
+                )
+            if not isinstance(item["summary"], str):
+                raise AgentContractError(
+                    f"implementer.verification[{index}].summary must be a string"
+                )
     if role in {"implementer", "reviewer"}:
         evidence = payload.get("acceptanceCriteria")
         if not isinstance(evidence, list):
@@ -253,6 +321,13 @@ def validate_role_result(role: str, payload: Any, task: Task) -> None:
         for item in evidence:
             if not isinstance(item, dict) or not isinstance(item.get("id"), str):
                 raise AgentContractError(f"Role {role} returned an invalid acceptanceCriteria entry")
+            _require_fields(
+                item,
+                {"id", "status", "evidence"},
+                f"Role {role} acceptanceCriteria entry",
+            )
+            if not item["id"].startswith("AC-"):
+                raise AgentContractError(f"Role {role} returned an invalid AC identifier")
             if item["id"] in by_id:
                 raise AgentContractError(f"Role {role} returned duplicate criterion {item['id']}")
             by_id[item["id"]] = item
@@ -281,6 +356,18 @@ def validate_role_result(role: str, payload: Any, task: Task) -> None:
         for finding in findings:
             if not isinstance(finding, dict):
                 raise AgentContractError("Reviewer returned an invalid finding")
+            _require_fields(
+                finding,
+                {
+                    "id",
+                    "severity",
+                    "file",
+                    "description",
+                    "expectedBehavior",
+                    "status",
+                },
+                "Reviewer finding",
+            )
             finding_id = finding.get("id")
             if not isinstance(finding_id, str) or not finding_id.startswith("REV-"):
                 raise AgentContractError("Every finding must have a stable REV-* identifier")
@@ -291,6 +378,11 @@ def validate_role_result(role: str, payload: Any, task: Task) -> None:
                 raise AgentContractError(f"{finding_id} has an invalid severity")
             if finding.get("status") not in {"open", "resolved"}:
                 raise AgentContractError(f"{finding_id} has an invalid status")
+            if not isinstance(finding.get("file"), str):
+                raise AgentContractError(f"{finding_id}.file must be a string")
+            for field in ("description", "expectedBehavior"):
+                if not isinstance(finding.get(field), str) or not finding[field].strip():
+                    raise AgentContractError(f"{finding_id}.{field} cannot be empty")
         if status == "PASS" and any(item.get("status") == "open" for item in findings):
             raise AgentContractError("Reviewer cannot return PASS with open findings")
         if status == "FAIL" and not any(item.get("status") == "open" for item in findings):

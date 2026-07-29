@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import hashlib
+import os
 import subprocess
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set
@@ -90,6 +90,24 @@ class Git:
     def branch_exists(self, branch: str) -> bool:
         return self.run(["show-ref", "--verify", f"refs/heads/{branch}"], check=False).returncode == 0
 
+    def branch_head(self, branch: str) -> str:
+        return self.run(["rev-parse", "--verify", f"refs/heads/{branch}"]).stdout.strip()
+
+    def ensure_branch_name(self, branch: str) -> None:
+        result = self.run(["check-ref-format", "--branch", branch], check=False)
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise GitError(f"Invalid Git branch name {branch!r}: {detail}")
+
+    def is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        result = self.run(
+            ["merge-base", "--is-ancestor", ancestor, descendant], check=False
+        )
+        if result.returncode not in {0, 1}:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise GitError(f"Cannot compare commits {ancestor} and {descendant}: {detail}")
+        return result.returncode == 0
+
     def add_worktree(self, path: Path, branch: str, base_sha: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.run(["worktree", "add", "-b", branch, str(path), base_sha])
@@ -134,7 +152,13 @@ class Git:
             if absolute.is_symlink():
                 snapshot[path] = "symlink:" + os.readlink(absolute)
             elif absolute.is_file():
-                snapshot[path] = sha256_file(absolute)
+                mode = oct(absolute.stat().st_mode & 0o7777)
+                snapshot[path] = f"file:{mode}:{sha256_file(absolute)}"
+            elif absolute.is_dir():
+                result = self.run(["rev-parse", "HEAD"], cwd=absolute, check=False)
+                head = result.stdout.strip() if result.returncode == 0 else "unknown"
+                mode = oct(absolute.stat().st_mode & 0o7777)
+                snapshot[path] = f"directory:{mode}:{head}"
             else:
                 snapshot[path] = "<missing>"
         return snapshot
@@ -153,6 +177,11 @@ class Git:
                 kind = "file"
                 mode = oct(absolute.stat().st_mode & 0o7777)
                 content = sha256_file(absolute)
+            elif absolute.is_dir():
+                kind = "directory"
+                mode = oct(absolute.stat().st_mode & 0o7777)
+                result = self.run(["rev-parse", "HEAD"], cwd=absolute, check=False)
+                content = result.stdout.strip() if result.returncode == 0 else "unknown"
             else:
                 kind = "missing"
                 mode = "missing"
@@ -193,6 +222,25 @@ class Git:
         self.run(["add", "-A", "--", ":/"], cwd=cwd)
         self.run(["commit", "-m", message], cwd=cwd)
         return self.head(cwd)
+
+    def commit_parent(self, commit: str, cwd: Optional[Path] = None) -> str:
+        fields = self.run(
+            ["rev-list", "--parents", "-n", "1", commit], cwd=cwd
+        ).stdout.split()
+        parents = fields[1:]
+        if len(parents) != 1:
+            raise GitError(
+                f"Final task commit {commit} must have exactly one parent; found {len(parents)}"
+            )
+        return parents[0]
+
+    def committed_paths(
+        self, base: str, commit: str, cwd: Optional[Path] = None
+    ) -> List[str]:
+        result = self.run(
+            ["diff", "--name-only", "--no-renames", "-z", base, commit], cwd=cwd
+        )
+        return sorted(path for path in result.stdout.split("\0") if path)
 
     def fast_forward(
         self, expected_base: str, branch: str, expected_branch: Optional[str] = None

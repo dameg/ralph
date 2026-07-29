@@ -7,7 +7,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 
 def read_json(path: Path) -> Dict[str, Any]:
@@ -44,9 +44,9 @@ def sha256_file(path: Path) -> str:
 
 
 def matches_any(path: str, patterns: Iterable[str]) -> bool:
-    normalized = path.replace(os.sep, "/").lstrip("./")
+    normalized = _normalize_repo_path(path)
     for pattern in patterns:
-        candidate = pattern.replace(os.sep, "/").lstrip("./")
+        candidate = _normalize_repo_path(pattern)
         if candidate.endswith("/**"):
             prefix = candidate[:-3].rstrip("/")
             if normalized == prefix or normalized.startswith(prefix + "/"):
@@ -54,6 +54,11 @@ def matches_any(path: str, patterns: Iterable[str]) -> bool:
         if fnmatch.fnmatchcase(normalized, candidate):
             return True
     return False
+
+
+def _normalize_repo_path(value: str) -> str:
+    normalized = value.replace(os.sep, "/")
+    return normalized[2:] if normalized.startswith("./") else normalized
 
 
 def slug(value: str) -> str:
@@ -93,7 +98,3 @@ def stable_env(extra: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
 
 def relative_path(root: Path, path: Path) -> str:
     return path.resolve().relative_to(root.resolve()).as_posix()
-
-
-def unique(items: Sequence[str]) -> List[str]:
-    return list(dict.fromkeys(items))

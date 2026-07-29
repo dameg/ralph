@@ -22,12 +22,41 @@ EXECUTABLE_STATUSES = {
 }
 ALL_STATUSES = EXECUTABLE_STATUSES | {"blocked", "needs_intervention", "completed"}
 DEFAULT_CYCLE_LIMIT = 5
+MANIFEST_FIELDS = {"version", "taskWorkspace", "tasks"}
+TASK_FIELDS = {
+    "id",
+    "title",
+    "status",
+    "prd",
+    "path",
+    "dependsOn",
+    "contract",
+    "qualityGates",
+    "limits",
+}
+
+
+def _reject_unknown(value: Dict[str, Any], allowed: Set[str], label: str) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ConfigError(f"{label} contains unknown fields: {', '.join(unknown)}")
+
+
+def _is_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _require_relative_path(value: str, label: str) -> None:
+    supplied = Path(value)
+    if supplied.is_absolute() or value.startswith("~") or ".." in supplied.parts:
+        raise ConfigError(f"{label} must be a relative path inside the repository")
 
 
 @dataclass
 class Task:
     raw: Dict[str, Any]
     workspace: str
+    session_prd: Optional[str] = None
 
     @property
     def id(self) -> str:
@@ -69,6 +98,10 @@ class Task:
     def cycle_limit(self) -> int:
         return int(self.raw["limits"]["cycles"])
 
+    def effective_prd(self, configured_prd: str) -> str:
+        return str(self.raw.get("prd") or self.session_prd or configured_prd)
+
+
 class Manifest:
     def __init__(self, path: Path, raw: Dict[str, Any]) -> None:
         self.path = path
@@ -99,15 +132,15 @@ class Manifest:
         atomic_write_json(self.path, self.raw)
 
     def validate(self, repo_root: Path) -> None:
-        if self.raw.get("version") != 4:
-            raise ConfigError("Manifest must use version=4")
-        if self.raw.get("workflow") != "planner-implementer-reviewer":
-            raise ConfigError("Manifest must use workflow=planner-implementer-reviewer")
+        _reject_unknown(self.raw, MANIFEST_FIELDS, "manifest")
+        if not _is_integer(self.raw.get("version")) or self.raw["version"] != 1:
+            raise ConfigError("Manifest must use version=1")
         raw_tasks = self.raw.get("tasks")
         if not isinstance(raw_tasks, list):
             raise ConfigError("manifest.tasks must be an array")
         if not isinstance(self.workspace, str) or not self.workspace:
             raise ConfigError("taskWorkspace must be a non-empty path")
+        _require_relative_path(self.workspace, "taskWorkspace")
         workspace_path = (repo_root / self.workspace).resolve()
         try:
             workspace_path.relative_to(repo_root.resolve())
@@ -115,10 +148,14 @@ class Manifest:
             raise ConfigError("taskWorkspace must be inside the repository") from error
 
         ids: Set[str] = set()
+        task_paths: Set[Path] = set()
         for index, raw in enumerate(raw_tasks):
             label = f"tasks[{index}]"
             if not isinstance(raw, dict):
                 raise ConfigError(f"{label} must be an object")
+            if "attempts" in raw:
+                raise ConfigError(f"{label}.attempts is not supported in manifest v1")
+            _reject_unknown(raw, TASK_FIELDS, label)
             task_id = raw.get("id")
             if not isinstance(task_id, str) or not task_id:
                 raise ConfigError(f"{label}.id must be a non-empty string")
@@ -135,15 +172,20 @@ class Manifest:
                 raise ConfigError(f"{task_id}.status has an unsupported value")
             if not isinstance(raw.get("path"), str) or not raw["path"]:
                 raise ConfigError(f"{task_id}.path must be a non-empty path")
+            _require_relative_path(raw["path"], f"{task_id}.path")
             task_path = (workspace_path / raw["path"]).resolve()
             try:
                 task_path.relative_to(workspace_path)
             except ValueError as error:
                 raise ConfigError(f"{task_id}.path escapes taskWorkspace") from error
+            if task_path in task_paths:
+                raise ConfigError(f"{task_id}.path resolves to a duplicate task directory")
+            task_paths.add(task_path)
             task_prd = raw.get("prd")
             if task_prd is not None:
                 if not isinstance(task_prd, str) or not task_prd:
                     raise ConfigError(f"{task_id}.prd must be a non-empty path")
+                _require_relative_path(task_prd, f"{task_id}.prd")
                 prd_path = (repo_root / task_prd).resolve()
                 try:
                     prd_path.relative_to(repo_root.resolve())
@@ -173,6 +215,11 @@ class Manifest:
         contract = raw.get("contract")
         if not isinstance(contract, dict):
             raise ConfigError(f"{task_id}.contract must be an object")
+        _reject_unknown(
+            contract,
+            {"acceptanceCriteria", "allowedPaths", "nonGoals"},
+            f"{task_id}.contract",
+        )
         criteria = contract.get("acceptanceCriteria")
         if not isinstance(criteria, list) or not criteria:
             raise ConfigError(f"{task_id} must define at least one acceptance criterion")
@@ -180,6 +227,11 @@ class Manifest:
         for criterion in criteria:
             if not isinstance(criterion, dict):
                 raise ConfigError(f"{task_id}.contract.acceptanceCriteria contains an invalid value")
+            _reject_unknown(
+                criterion,
+                {"id", "description"},
+                f"{task_id}.contract.acceptanceCriteria",
+            )
             criterion_id = criterion.get("id")
             description = criterion.get("description")
             if not isinstance(criterion_id, str) or not criterion_id.startswith("AC-"):
@@ -211,6 +263,11 @@ class Manifest:
         for gate in gates:
             if not isinstance(gate, dict) or not isinstance(gate.get("name"), str) or not gate["name"]:
                 raise ConfigError(f"{task_id}: every quality gate must have a name")
+            _reject_unknown(
+                gate,
+                {"name", "command", "timeoutSeconds"},
+                f"{task_id}.qualityGates.{gate['name']}",
+            )
             if gate["name"] in names:
                 raise ConfigError(f"{task_id}: duplicate quality gate {gate['name']}")
             names.add(gate["name"])
@@ -219,17 +276,15 @@ class Manifest:
             except ValueError as error:
                 raise ConfigError(str(error)) from error
             timeout = gate.get("timeoutSeconds", 600)
-            if not isinstance(timeout, int) or timeout < 1:
+            if not _is_integer(timeout) or timeout < 1:
                 raise ConfigError(f"{task_id}.{gate['name']}.timeoutSeconds must be positive")
 
     def _validate_limits(self, raw: Dict[str, Any], task_id: str) -> None:
         limits = raw.get("limits")
         if not isinstance(limits, dict) or set(limits) != {"cycles"}:
             raise ConfigError(f"{task_id}.limits must contain only cycles")
-        if not isinstance(limits["cycles"], int) or limits["cycles"] < 1:
+        if not _is_integer(limits["cycles"]) or limits["cycles"] < 1:
             raise ConfigError(f"{task_id}.limits.cycles must be positive")
-        if "attempts" in raw:
-            raise ConfigError(f"{task_id}.attempts is not supported in manifest v4")
 
     def _validate_acyclic(self) -> None:
         graph = {task.id: task.depends_on for task in self.tasks}
@@ -262,11 +317,9 @@ class Manifest:
         for task in self.tasks:
             if (
                 task.status == "blocked"
-                and task.raw.get("blockReason", "dependencies") == "dependencies"
                 and set(task.depends_on).issubset(completed)
             ):
                 task.status = "ready"
-                task.raw.pop("blockReason", None)
                 promoted.append(task.id)
         return promoted
 
@@ -286,8 +339,7 @@ class Manifest:
 
 def blank_manifest(task_workspace: str) -> Dict[str, Any]:
     return {
-        "version": 4,
-        "workflow": "planner-implementer-reviewer",
+        "version": 1,
         "taskWorkspace": task_workspace,
         "tasks": [],
     }
