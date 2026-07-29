@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Protocol
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Union
 
 from .config import Config
 from .errors import AgentContractError, AgentError, AgentInfrastructureError
@@ -23,6 +24,26 @@ ROLE_STATUSES = {
 }
 
 
+@dataclass(frozen=True)
+class TokenUsage:
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+
+    def as_dict(self) -> Dict[str, int]:
+        return {
+            "inputTokens": self.input_tokens,
+            "outputTokens": self.output_tokens,
+            "cachedInputTokens": self.cached_input_tokens,
+        }
+
+
+@dataclass(frozen=True)
+class AgentResult:
+    payload: Dict[str, Any]
+    usage: Optional[TokenUsage] = None
+
+
 class Agent(Protocol):
     def run(
         self,
@@ -33,7 +54,7 @@ class Agent(Protocol):
         log_path: Path,
         context: str = "",
         invocation: int = 1,
-    ) -> Dict[str, Any]:
+    ) -> Union[Dict[str, Any], AgentResult]:
         ...
 
 
@@ -50,7 +71,7 @@ class CodexAgent:
         log_path: Path,
         context: str = "",
         invocation: int = 1,
-    ) -> Dict[str, Any]:
+    ) -> AgentResult:
         prompt_path = root / ".ralph" / "prompts" / f"{role}.md"
         schema_path = root / ".ralph" / "schemas" / f"{role}-result.schema.json"
         task_file = root / task.task_dir / "task.md"
@@ -82,6 +103,8 @@ class CodexAgent:
             "--config",
             f'model_reasoning_effort="{reasoning_effort}"',
         ]
+        if self._is_codex_command():
+            command.append("--json")
         command.append("-")
         prompt = self._prompt(role, task, context)
         try:
@@ -117,7 +140,10 @@ class CodexAgent:
                 f"Invalid JSON from role {role}: {error}; log: {log_path}"
             ) from error
         validate_role_result(role, payload, task)
-        return payload
+        return AgentResult(payload, parse_usage_log(log_path) if self._is_codex_command() else None)
+
+    def _is_codex_command(self) -> bool:
+        return bool(self.config.agent.command) and Path(self.config.agent.command[0]).name == "codex"
 
     def _prompt(self, role: str, task: Task, context: str) -> str:
         artifacts = {
@@ -161,6 +187,51 @@ Machine contract:
 Additional recovery context:
 {context or 'None.'}
 """
+
+
+def parse_usage_log(path: Path) -> Optional[TokenUsage]:
+    """Return the final token usage reported by a Codex JSONL invocation."""
+    usage: Optional[TokenUsage] = None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        for candidate in _usage_objects(event):
+            parsed = _token_usage(candidate)
+            if parsed is not None:
+                usage = parsed
+    return usage
+
+
+def _usage_objects(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _usage_objects(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _usage_objects(child)
+
+
+def _token_usage(value: Mapping[str, Any]) -> Optional[TokenUsage]:
+    def number(*keys: str) -> Optional[int]:
+        for key in keys:
+            candidate = value.get(key)
+            if isinstance(candidate, int) and candidate >= 0:
+                return candidate
+        return None
+
+    input_tokens = number("input_tokens", "inputTokens")
+    output_tokens = number("output_tokens", "outputTokens")
+    cached = number("cached_input_tokens", "cachedInputTokens")
+    if input_tokens is None or output_tokens is None:
+        return None
+    return TokenUsage(input_tokens, output_tokens, cached or 0)
 
 
 def validate_role_result(role: str, payload: Any, task: Task) -> None:

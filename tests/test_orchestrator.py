@@ -70,7 +70,7 @@ class OrchestratorTests(unittest.TestCase):
             result = Orchestrator(repo.config, UI(color="never"), agent=SuccessfulAgent()).run()
         rendered = output.getvalue()
         self.assertEqual(result, 0)
-        for marker in ("🧠", "🛠️", "🧪", "🔍", "✅"):
+        for marker in ("🧠", "🛠️", "🧪", "🔍", "✅", "📚", "PRD:", "All PRDs complete", "Active work:"):
             self.assertIn(marker, rendered)
         self.assertNotIn("fake agent", rendered)
 
