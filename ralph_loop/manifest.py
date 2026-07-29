@@ -69,12 +69,6 @@ class Task:
     def cycle_limit(self) -> int:
         return int(self.raw["limits"]["cycles"])
 
-    def decrement(self, stage: str) -> int:
-        attempts = self.raw.setdefault("attempts", {})
-        attempts[stage] = max(0, int(attempts.get(stage, 0)) - 1)
-        return attempts[stage]
-
-
 class Manifest:
     def __init__(self, path: Path, raw: Dict[str, Any]) -> None:
         self.path = path
