@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from .agent import Agent, CodexAgent, validate_role_result
+from .agent import Agent, AgentResult, CodexAgent, TokenUsage, validate_role_result
 from .config import Config
 from .errors import (
     AgentContractError,
@@ -29,6 +30,7 @@ class RoleRun:
     result: Dict[str, Any]
     run_id: str
     sequence: int
+    usage: Optional[TokenUsage] = None
 
 
 class Orchestrator:
@@ -61,6 +63,8 @@ class Orchestrator:
         self.journal.record("run_started", maxCycles=maximum)
         cycles_started = 0
         display_iteration = 0
+        seen_prds: Set[str] = set()
+        last_task_id: Optional[str] = None
 
         while True:
             session, manifest, task = self._current_work()
@@ -82,8 +86,16 @@ class Orchestrator:
             if cycles_started >= maximum and session.data.get("currentCycle") is None:
                 return self._pause_at_cycle_limit(manifest, maximum, session)
 
+            prd = self._task_prd(task)
+            prd_position = self._prd_position(manifest, task, prd)
+            if task.id != last_task_id:
+                self.ui.prd_started(prd, *prd_position, resumed=prd in seen_prds)
+                seen_prds.add(prd)
+                last_task_id = task.id
             display_iteration += 1
-            self.ui.iteration(display_iteration, maximum, task.id, task.title)
+            self.ui.iteration(
+                display_iteration, maximum, task.id, task.title, prd=prd, prd_position=prd_position
+            )
             self.ui.detail(
                 f"State: {task.status} · cycles: "
                 f"{session.data['cyclesUsed']}/{session.cycle_capacity()}"
@@ -211,11 +223,7 @@ class Orchestrator:
         elif len(active) > 1:
             ids = ", ".join(session.data.get("taskId", "?") for session in active)
             raise GitError(f"More than one active session was detected: {ids}")
-        elif (
-            active[0].data.get("prd") is not None
-            and active[0].data["prd"]
-            != relative_path(self.config.root, self.config.prd_path)
-        ):
+        elif active[0].data.get("prd") is not None and active[0].data["prd"] != self._session_prd(active[0]):
             raise ConfigError(
                 f"Active session {active[0].data['taskId']} is bound to PRD "
                 f"{active[0].data['prd']}. Resume it with "
@@ -341,13 +349,14 @@ class Orchestrator:
             branch,
             base_sha,
             base_branch,
-            relative_path(self.config.root, self.config.prd_path),
+            self._task_prd(task),
             task.cycle_limit,
             task.status,
         )
         self.journal.record(
             "session_started",
             taskId=task.id,
+            prd=self._task_prd(task),
             branch=branch,
             baseSha=base_sha,
             worktree=str(worktree),
@@ -730,12 +739,14 @@ class Orchestrator:
         result_path = result_dir / f"{sequence:03d}-{role}.json"
         log_path = result_dir / f"{sequence:03d}-{role}.log"
         model, effort, escalated = self.config.agent.model_for(role, invocation)
+        prd = self._task_prd(task)
         self.ui.detail(
             f"Model: {model} · reasoning: {effort}" + (" · escalated" if escalated else "")
         )
         self.journal.record(
             "role_started",
             taskId=task.id,
+            prd=prd,
             role=role,
             runId=run_id,
             invocation=invocation,
@@ -746,12 +757,14 @@ class Orchestrator:
         before = self.git.file_snapshot(worktree)
         caught: Optional[Exception] = None
         result: Optional[Dict[str, Any]] = None
+        usage: Optional[TokenUsage] = None
+        started = time.monotonic()
         try:
             with self.ui.step(
                 {"planner": "🧠", "implementer": "🛠️ ", "reviewer": "🔍"}[role],
                 f"{role.title()} · {task.id}",
             ):
-                result = self.agent.run(
+                agent_result = self.agent.run(
                     role,
                     task,
                     worktree,
@@ -760,6 +773,11 @@ class Orchestrator:
                     context,
                     invocation,
                 )
+            if isinstance(agent_result, AgentResult):
+                result = agent_result.payload
+                usage = agent_result.usage
+            else:
+                result = agent_result
             validate_role_result(role, result, task)
             self._require_artifact(session, task, {
                 "planner": "plan.md", "implementer": "progress.md", "reviewer": "review.md"
@@ -773,7 +791,13 @@ class Orchestrator:
         self._assert_role_scope(role, task, changed, allowed)
         if caught:
             self.journal.record(
-                "role_rejected", taskId=task.id, role=role, runId=run_id, error=str(caught)
+                "role_rejected",
+                taskId=task.id,
+                prd=prd,
+                role=role,
+                runId=run_id,
+                error=str(caught),
+                elapsedSeconds=round(time.monotonic() - started, 3),
             )
             if isinstance(caught, AgentError):
                 raise caught
@@ -789,6 +813,7 @@ class Orchestrator:
         self.journal.record(
             "role_accepted",
             taskId=task.id,
+            prd=prd,
             role=role,
             runId=run_id,
             invocation=invocation,
@@ -796,8 +821,10 @@ class Orchestrator:
             resultPath=str(result_path),
             logPath=str(log_path),
             status=result["status"],
+            elapsedSeconds=round(time.monotonic() - started, 3),
+            usage=usage.as_dict() if usage else None,
         )
-        return RoleRun(result, run_id, sequence)
+        return RoleRun(result, run_id, sequence, usage)
 
     def _assert_role_scope(
         self, role: str, task: Task, changed: set[str], allowed: List[str]
@@ -861,6 +888,11 @@ class Orchestrator:
         before = self.git.file_snapshot(worktree)
         caught: Optional[Exception] = None
         results = []
+        prd = self._task_prd(task)
+        started = time.monotonic()
+        self.journal.record(
+            "quality_gates_started", taskId=task.id, prd=prd, stage=stage, sequence=sequence
+        )
         try:
             results = self.gates.run_all(task, worktree, log_dir)
         except Exception as error:
@@ -873,9 +905,11 @@ class Orchestrator:
             self.journal.record(
                 "quality_gates_failed",
                 taskId=task.id,
+                prd=prd,
                 stage=stage,
                 sequence=sequence,
                 error=str(caught),
+                elapsedSeconds=round(time.monotonic() - started, 3),
             )
             if isinstance(caught, (GateFailure, GateInfrastructureError)):
                 raise caught
@@ -883,8 +917,10 @@ class Orchestrator:
         self.journal.record(
             "quality_gates_passed",
             taskId=task.id,
+            prd=prd,
             stage=stage,
             sequence=sequence,
+            elapsedSeconds=round(time.monotonic() - started, 3),
             results=[
                 {
                     "name": item.name,
@@ -1067,6 +1103,8 @@ class Orchestrator:
             self.journal.record("commit_confirmed", taskId=task.id, commitSha=commit_sha)
         self._merge_and_cleanup(session)
         self.ui.success(f"{task.id} completed · {commit_sha[:8]}")
+        if manifest.counts().get("completed", 0) < len(manifest.tasks):
+            self._show_summary(manifest, task)
 
     def _merge_and_cleanup(self, session: Session) -> None:
         commit_sha = session.data.get("commitSha")
@@ -1103,7 +1141,7 @@ class Orchestrator:
     ) -> int:
         self.journal.record("run_cycle_limit_reached", maxCycles=maximum)
         self.ui.warning(f"Reached the {maximum}-cycle run limit; state can be resumed safely.")
-        self._show_summary(manifest)
+        self._show_summary(manifest, active_task_id=session.data["taskId"] if session else None)
         return 2
 
     def _finish_without_task(
@@ -1111,7 +1149,7 @@ class Orchestrator:
     ) -> int:
         if manifest is None:
             raise ConfigError("Cannot read task state")
-        self._show_summary(manifest)
+        self._show_summary(manifest, active_task_id=session.data["taskId"] if session else None)
         counts = manifest.counts()
         total = len(manifest.tasks)
         completed = counts.get("completed", 0)
@@ -1136,11 +1174,57 @@ class Orchestrator:
             self.ui.warning("No executable tasks remain; check dependencies and blockers.")
         return 3
 
-    def _show_summary(self, manifest: Manifest) -> None:
+    def _show_summary(
+        self,
+        manifest: Manifest,
+        completed_task: Optional[Task] = None,
+        active_task_id: Optional[str] = None,
+    ) -> None:
         counts = manifest.counts()
+        task_prds = {task.id: self._task_prd(task) for task in manifest.tasks}
+        metrics = self.journal.work_metrics(task_prds, active_task_id)
+        all_complete = bool(manifest.tasks) and counts.get("completed", 0) == len(manifest.tasks)
         self.ui.summary(
             counts.get("completed", 0),
             len(manifest.tasks),
             counts.get("blocked", 0),
             counts.get("needs_intervention", 0),
+            active_seconds=metrics.active_seconds,
+            task_usage=(metrics.task_usage.get(completed_task.id) if completed_task else None),
+            total_usage=metrics.usage,
+            prd_rows=self._prd_rows(manifest, metrics) if all_complete else None,
+            all_complete=all_complete,
         )
+
+    def _task_prd(self, task: Task) -> str:
+        return str(task.raw.get("prd", relative_path(self.config.root, self.config.prd_path)))
+
+    def _session_prd(self, session: Session) -> str:
+        worktree = Path(session.data["worktree"])
+        try:
+            manifest = Manifest.load(worktree / self.manifest_relative, worktree)
+            return self._task_prd(manifest.get(session.data["taskId"]))
+        except (ConfigError, KeyError, OSError):
+            return relative_path(self.config.root, self.config.prd_path)
+
+    def _prd_position(self, manifest: Manifest, task: Task, prd: str) -> Tuple[int, int]:
+        grouped = [item for item in manifest.tasks if self._task_prd(item) == prd]
+        return grouped.index(task) + 1, len(grouped)
+
+    def _prd_rows(self, manifest: Manifest, metrics: Any) -> List[Tuple[str, int, int, float, Any]]:
+        prds: List[str] = []
+        for task in manifest.tasks:
+            prd = self._task_prd(task)
+            if prd not in prds:
+                prds.append(prd)
+        rows = []
+        for prd in prds:
+            tasks = [task for task in manifest.tasks if self._task_prd(task) == prd]
+            rows.append((
+                prd,
+                sum(task.status == "completed" for task in tasks),
+                len(tasks),
+                metrics.prd_seconds.get(prd, 0.0),
+                metrics.prd_usage.get(prd),
+            ))
+        return rows

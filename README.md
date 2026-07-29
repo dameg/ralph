@@ -212,6 +212,18 @@ Use `ralph run --verbose` to see cycle usage, model selection, reasoning effort,
 and escalation. `ralph status` shows active cycles, pending review, intervention
 details, and suggested actions.
 
+## Progress and usage reporting
+
+Interactive terminals show a spinner and elapsed timer while a role or quality
+gate runs. Ralph announces the effective PRD for each task (`task.prd` takes
+precedence over the configured or `--prd` value), then reports task and overall
+progress after every completed task. Final completion includes one line per PRD
+with active work time and token usage.
+
+Token usage is collected from Codex JSONL output as input, output, and cached
+input tokens. Custom agent commands, or Codex versions that do not provide
+usage events, continue normally and display `usage unavailable`.
+
 ## Determinism and safety
 
 - Role JSON is schema-validated and checked for complete `AC-*` evidence.
