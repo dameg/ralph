@@ -1,6 +1,5 @@
 {
-  "version": 4,
-  "workflow": "planner-implementer-reviewer",
+  "version": 1,
   "taskWorkspace": "docs/tasks/example-module",
   "tasks": [
     {

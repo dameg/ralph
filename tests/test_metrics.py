@@ -22,7 +22,7 @@ class MetricsTests(unittest.TestCase):
         assert usage is not None
         self.assertEqual((usage.input_tokens, usage.output_tokens, usage.cached_input_tokens), (1200, 34, 900))
 
-    def test_work_metrics_combines_legacy_time_new_time_and_usage(self):
+    def test_work_metrics_combines_timestamp_fallback_elapsed_time_and_usage(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = Journal(Path(directory))
             journal.path.write_text(

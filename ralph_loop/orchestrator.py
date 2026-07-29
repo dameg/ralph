@@ -5,7 +5,8 @@ from pathlib import Path
 import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from .agent import Agent, AgentResult, CodexAgent, TokenUsage, validate_role_result
+from . import __version__
+from .agent import Agent, AgentResult, CodexAgent, validate_role_result
 from .config import Config
 from .errors import (
     AgentContractError,
@@ -30,7 +31,6 @@ class RoleRun:
     result: Dict[str, Any]
     run_id: str
     sequence: int
-    usage: Optional[TokenUsage] = None
 
 
 class Orchestrator:
@@ -59,7 +59,9 @@ class Orchestrator:
 
     def _run_locked(self, maximum: int) -> int:
         self._preflight()
-        self.ui.banner("RALPH LOOP v4", "planner → [implementer → gates → reviewer]")
+        self.ui.banner(
+            f"RALPH LOOP {__version__}", "planner → [implementer → gates → reviewer]"
+        )
         self.journal.record("run_started", maxCycles=maximum)
         cycles_started = 0
         display_iteration = 0
@@ -94,7 +96,7 @@ class Orchestrator:
                 last_task_id = task.id
             display_iteration += 1
             self.ui.iteration(
-                display_iteration, maximum, task.id, task.title, prd=prd, prd_position=prd_position
+                display_iteration, task.id, task.title, prd=prd, prd_position=prd_position
             )
             self.ui.detail(
                 f"State: {task.status} · cycles: "
@@ -131,9 +133,17 @@ class Orchestrator:
             if task.status == "completed":
                 self._complete(session, manifest, task)
 
-    def retry(self, task_id: str, stage: str, attempts: int) -> int:
+    def retry(
+        self,
+        task_id: str,
+        stage: str,
+        attempts: int,
+        note: Optional[str] = None,
+    ) -> int:
         if attempts < 1:
             raise ConfigError("--attempts must be positive")
+        if note is not None and not note.strip():
+            raise ConfigError("--note cannot be empty")
         with self.journal.lock():
             self._preflight()
             session, manifest, task = self._active_command_task(task_id)
@@ -168,7 +178,9 @@ class Orchestrator:
 
             retries = session.data.setdefault("manualRetries", {})
             retries[stage] = int(retries.get(stage, 0)) + attempts
-            self._clear_intervention(session, task)
+            if note:
+                session.data["recoveryContext"] = note.strip()
+            self._clear_intervention(session)
             self._set_status(
                 session,
                 manifest,
@@ -180,6 +192,7 @@ class Orchestrator:
                 taskId=task.id,
                 stage=stage,
                 attempts=attempts,
+                noteProvided=bool(note),
             )
             self.ui.success(f"Granted {attempts} additional {stage} invocation(s) for {task.id}")
             return 0
@@ -198,7 +211,7 @@ class Orchestrator:
             session.data["cycleGrants"] = int(session.data.get("cycleGrants", 0)) + cycles
             if intervention.get("reason") == "no_progress":
                 session.data["stallOverrideOnce"] = True
-            self._clear_intervention(session, task)
+            self._clear_intervention(session)
             self._set_status(
                 session,
                 manifest,
@@ -213,6 +226,7 @@ class Orchestrator:
         self.git.ensure_repository()
         self.git.ensure_head()
         self.git.ensure_identity()
+        self.git.ensure_branch_name(f"{self.config.git.branch_prefix}task")
         if not self.config.prd_path.is_file():
             raise ConfigError(f"PRD not found: {self.config.prd_path}")
         self.git.exclude_runtime(self.runtime_relative)
@@ -223,11 +237,13 @@ class Orchestrator:
         elif len(active) > 1:
             ids = ", ".join(session.data.get("taskId", "?") for session in active)
             raise GitError(f"More than one active session was detected: {ids}")
-        elif active[0].data.get("prd") is not None and active[0].data["prd"] != self._session_prd(active[0]):
+        else:
+            self._validate_session_prd(active[0])
+        if active and self._effective_session_prd(active[0]) != self._session_prd(active[0]):
             raise ConfigError(
                 f"Active session {active[0].data['taskId']} is bound to PRD "
-                f"{active[0].data['prd']}. Resume it with "
-                f"`ralph run --prd {active[0].data['prd']}`."
+                f"{self._effective_session_prd(active[0])}, but its task now declares "
+                f"{self._session_prd(active[0])}. Restore the task contract before resuming."
             )
         self._recover_commit(active[0] if active else None)
         if active and active[0].data.get("active"):
@@ -247,30 +263,40 @@ class Orchestrator:
     def _recover_commit(self, session: Optional[Session]) -> None:
         if session is None:
             return
+        commit_sha = session.data.get("commitSha")
+        if session.data.get("merged"):
+            if not commit_sha or not self._base_branch_contains(session, commit_sha):
+                raise GitError(
+                    f"Session {session.data['taskId']} is marked as merged, but "
+                    f"{session.data['baseBranch']} does not contain its confirmed commit"
+                )
+            self.journal.record(
+                "cleanup_recovered",
+                taskId=session.data["taskId"],
+                commitSha=commit_sha,
+            )
+            self._cleanup_session(session)
+            return
         worktree = Path(session.data["worktree"])
         if not worktree.is_dir():
-            if session.data.get("commitSha") and self.git.head() == session.data["commitSha"]:
-                if not self.config.git.keep_branches and self.git.branch_exists(
-                    session.data["branch"]
-                ):
-                    self.git.delete_branch(session.data["branch"])
+            if commit_sha and self._base_branch_contains(session, commit_sha):
                 session.data["merged"] = True
-                session.data["active"] = False
                 session.save()
                 self.journal.record(
-                    "cleanup_recovered",
+                    "merge_recovered",
                     taskId=session.data["taskId"],
-                    commitSha=session.data["commitSha"],
+                    commitSha=commit_sha,
                 )
+                self._cleanup_session(session)
                 return
             raise GitError(
                 f"Worktree for active session {session.data['taskId']} not found: {worktree}"
             )
         worktree_head = self.git.head(worktree)
-        commit_sha = session.data.get("commitSha")
         manifest = self._manifest_for_session(session)
         task = manifest.get(session.data["taskId"])
         if not commit_sha and worktree_head != session.data["baseSha"] and task.status == "completed":
+            self._validate_task_commit(session, task, worktree_head, worktree)
             session.data["commitSha"] = worktree_head
             session.save()
             commit_sha = worktree_head
@@ -283,7 +309,8 @@ class Orchestrator:
                 "precommit_state_recovered", taskId=task.id, nextStatus="finalizing"
             )
         if commit_sha and not session.data.get("merged"):
-            if self.git.head() == commit_sha:
+            self._validate_task_commit(session, task, commit_sha, worktree)
+            if self._base_branch_contains(session, commit_sha):
                 session.data["merged"] = True
                 session.save()
                 self.journal.record("merge_recovered", taskId=task.id, commitSha=commit_sha)
@@ -292,18 +319,34 @@ class Orchestrator:
             self.ui.info(f"Recovering the confirmed commit for {task.id}", "♻️ ")
             self._merge_and_cleanup(session)
 
+    def _base_branch_contains(self, session: Session, commit_sha: str) -> bool:
+        base_head = self.git.branch_head(session.data["baseBranch"])
+        return self.git.is_ancestor(commit_sha, base_head)
+
+    def _validate_session_prd(self, session: Session) -> None:
+        value = self._effective_session_prd(session)
+        supplied = Path(value)
+        if supplied.is_absolute() or value.startswith("~") or ".." in supplied.parts:
+            raise ConfigError(f"Session effectivePrd must be repository-relative: {value}")
+        worktree = Path(session.data["worktree"])
+        root = worktree if worktree.is_dir() else self.config.root
+        candidate = (root / supplied).resolve()
+        try:
+            candidate.relative_to(root.resolve())
+        except ValueError as error:
+            raise ConfigError(f"Session effectivePrd escapes the repository: {value}") from error
+        if not candidate.is_file():
+            raise ConfigError(f"Session effectivePrd not found: {candidate}")
+
     def _reconcile_session(self, session: Session) -> None:
         manifest = self._manifest_for_session(session)
         task = manifest.get(session.data["taskId"])
-        intervention = session.data.get("intervention")
-        if intervention:
+        if session.data.get("intervention"):
             expected = "needs_intervention"
         else:
             expected = session.data.get("workflowStatus")
         if expected and task.status != expected:
             task.status = expected
-            if intervention:
-                task.raw["intervention"] = intervention
             manifest.save()
             self.journal.record("state_reconciled", taskId=task.id, status=expected)
 
@@ -366,7 +409,11 @@ class Orchestrator:
 
     def _manifest_for_session(self, session: Session) -> Manifest:
         worktree = Path(session.data["worktree"])
-        return Manifest.load(worktree / self.manifest_relative, worktree)
+        manifest = Manifest.load(worktree / self.manifest_relative, worktree)
+        manifest.get(session.data["taskId"]).session_prd = self._effective_session_prd(
+            session
+        )
+        return manifest
 
     def _process_stage(self, session: Session, manifest: Manifest, task: Task) -> bool:
         if task.status in {"ready", "planning", "needs_replan"}:
@@ -402,20 +449,26 @@ class Orchestrator:
         )
         if run is None:
             return
-        session.data["planningCredits"] = int(session.data["planningCredits"]) - 1
         result = run.result
         if result["status"] == "READY":
-            task.raw.pop("blockReason", None)
-            next_status = "planned"
+            session.data["planningCredits"] = int(session.data["planningCredits"]) - 1
+            session.data["unconsumedRoleRun"] = None
+            self._set_status(session, manifest, task, "planned")
+            self.journal.record("planner_finished", taskId=task.id, status=result["status"])
             self.ui.success("Plan is ready and validated")
-        elif result["status"] == "BLOCKED":
-            task.raw["blockReason"] = "planner"
-            next_status = "blocked"
-        else:
-            task.raw["blockReason"] = "clarification"
-            next_status = "blocked"
+            return
+
         session.data["unconsumedRoleRun"] = None
-        self._set_status(session, manifest, task, next_status)
+        reason = "role_blocked" if result["status"] == "BLOCKED" else "needs_clarification"
+        self._intervene(
+            session,
+            manifest,
+            task,
+            reason,
+            "planning",
+            "planning",
+            {"summary": result["summary"]},
+        )
         self.journal.record("planner_finished", taskId=task.id, status=result["status"])
 
     def _implementer(self, session: Session, manifest: Manifest, task: Task) -> bool:
@@ -464,10 +517,17 @@ class Orchestrator:
         if result["status"] == "BLOCKED":
             session.data["currentCycle"] = None
             session.data["unconsumedRoleRun"] = None
-            task.raw["blockReason"] = "implementer"
-            self._set_status(session, manifest, task, "blocked")
             self.journal.record(
                 "cycle_released", taskId=task.id, cycleId=cycle["id"], reason="blocked"
+            )
+            self._intervene(
+                session,
+                manifest,
+                task,
+                "role_blocked",
+                "implementation",
+                "implementing",
+                {"summary": result["summary"]},
             )
             return started
 
@@ -491,7 +551,6 @@ class Orchestrator:
         }
         session.data["pendingReview"] = pending
         session.data["unconsumedRoleRun"] = None
-        task.raw.pop("lastFailure", None)
         self._set_status(session, manifest, task, "verifying")
         self.journal.record(
             "review_obligation_created",
@@ -512,10 +571,6 @@ class Orchestrator:
         pending["gateStatus"] = status
         pending["gateError"] = error
         session.data["currentCycle"]["status"] = "review"
-        if error:
-            task.raw["lastFailure"] = error
-        else:
-            task.raw.pop("lastFailure", None)
         self._set_status(session, manifest, task, "in_review")
 
     def _reviewer(self, session: Session, manifest: Manifest, task: Task) -> None:
@@ -665,13 +720,10 @@ class Orchestrator:
             return
         status, error = outcome
         if status == "PASS":
-            task.raw.pop("intervention", None)
-            task.raw.pop("lastFailure", None)
             self._set_status(session, manifest, task, "completed")
             return
         session.data["currentCycle"] = None
         session.save()
-        task.raw["lastFailure"] = error
         if session.has_cycle_capacity():
             self._set_status(session, manifest, task, "needs_changes")
         else:
@@ -708,6 +760,13 @@ class Orchestrator:
                 runId=unconsumed["runId"],
             )
             return RoleRun(result, unconsumed["runId"], int(unconsumed["sequence"]))
+        recovery_context = session.data.get("recoveryContext")
+        if isinstance(recovery_context, str) and recovery_context:
+            context = (
+                f"{context}\n\nOperator recovery note:\n{recovery_context}"
+                if context
+                else f"Operator recovery note:\n{recovery_context}"
+            )
         while True:
             try:
                 run = self._run_role_once(
@@ -720,6 +779,8 @@ class Orchestrator:
                     return None
                 continue
             self._reset_technical(session, stage)
+            if session.data.pop("recoveryContext", None) is not None:
+                session.save()
             return run
 
     def _run_role_once(
@@ -754,10 +815,16 @@ class Orchestrator:
             reasoningEffort=effort,
             escalated=escalated,
         )
+        before_head = self.git.head(worktree)
+        if before_head != session.data["baseSha"]:
+            raise ScopeError(
+                f"Role {role} started with worktree HEAD {before_head}; "
+                f"expected {session.data['baseSha']}"
+            )
         before = self.git.file_snapshot(worktree)
         caught: Optional[Exception] = None
         result: Optional[Dict[str, Any]] = None
-        usage: Optional[TokenUsage] = None
+        usage = None
         started = time.monotonic()
         try:
             with self.ui.step(
@@ -787,6 +854,11 @@ class Orchestrator:
         except Exception as error:
             caught = error
         after = self.git.file_snapshot(worktree)
+        after_head = self.git.head(worktree)
+        if after_head != before_head:
+            raise ScopeError(
+                f"Role {role} changed worktree HEAD from {before_head} to {after_head}"
+            )
         changed = self.git.changed_since(before, after)
         self._assert_role_scope(role, task, changed, allowed)
         if caught:
@@ -824,7 +896,7 @@ class Orchestrator:
             elapsedSeconds=round(time.monotonic() - started, 3),
             usage=usage.as_dict() if usage else None,
         )
-        return RoleRun(result, run_id, sequence, usage)
+        return RoleRun(result, run_id, sequence)
 
     def _assert_role_scope(
         self, role: str, task: Task, changed: set[str], allowed: List[str]
@@ -845,12 +917,7 @@ class Orchestrator:
                 f"Role {role} modified artifacts belonging to another stage or task: "
                 + ", ".join(violations)
             )
-        protected = [
-            ".git/**", ".ralph/**", "references/**", "**/AGENTS.md",
-            self.manifest_relative, relative_path(self.config.root, self.config.prd_path),
-            task.raw.get("prd", relative_path(self.config.root, self.config.prd_path)),
-            f"{task.task_dir}/task.md",
-        ]
+        protected = self._protected_paths(task)
         if role != "planner":
             protected.append(f"{task.task_dir}/plan.md")
         if role != "reviewer":
@@ -883,6 +950,12 @@ class Orchestrator:
 
     def _run_gates_once(self, session: Session, task: Task, stage: str) -> None:
         worktree = Path(session.data["worktree"])
+        before_head = self.git.head(worktree)
+        if before_head != session.data["baseSha"]:
+            raise ScopeError(
+                f"Quality gate started with worktree HEAD {before_head}; "
+                f"expected {session.data['baseSha']}"
+            )
         sequence = session.next_sequence()
         log_dir = session.path.parent / "gates" / f"{sequence:03d}-{stage}"
         before = self.git.file_snapshot(worktree)
@@ -898,6 +971,11 @@ class Orchestrator:
         except Exception as error:
             caught = error
         after = self.git.file_snapshot(worktree)
+        after_head = self.git.head(worktree)
+        if after_head != before_head:
+            raise ScopeError(
+                f"Quality gate changed worktree HEAD from {before_head} to {after_head}"
+            )
         changed = self.git.changed_since(before, after)
         if changed:
             raise ScopeError("Quality gate modified the worktree: " + ", ".join(sorted(changed)))
@@ -947,8 +1025,6 @@ class Orchestrator:
         manual = int(session.data.setdefault("manualRetries", {}).get(stage, 0))
         allowed_attempts = 1 + self.config.technical_retries + manual
         session.save()
-        task.raw["lastFailure"] = error
-        manifest.save()
         if failures[stage] >= allowed_attempts:
             self._intervene(
                 session,
@@ -992,9 +1068,6 @@ class Orchestrator:
             actions = [["ralph", "extend", task.id, "--cycles", "1"]]
         else:
             actions = [["ralph", "retry", task.id, "--stage", stage, "--attempts", "1"]]
-        if session.data.get("prd"):
-            for action in actions:
-                action.extend(["--prd", session.data["prd"]])
         intervention = {
             "reason": reason,
             "stage": stage,
@@ -1003,19 +1076,14 @@ class Orchestrator:
             "nextActions": actions,
         }
         session.data["intervention"] = intervention
-        session.data["resumeStatus"] = resume_status
-        task.raw["intervention"] = intervention
         self._set_status(session, manifest, task, "needs_intervention")
         self.journal.record(
             "intervention_required", taskId=task.id, **intervention
         )
         self.ui.warning(f"{task.id} needs intervention: {reason}")
 
-    def _clear_intervention(self, session: Session, task: Task) -> None:
+    def _clear_intervention(self, session: Session) -> None:
         session.data["intervention"] = None
-        session.data["resumeStatus"] = None
-        task.raw.pop("intervention", None)
-        task.raw.pop("blockReason", None)
 
     def _pending_review(self, session: Session, task: Task) -> Dict[str, Any]:
         pending = session.data.get("pendingReview")
@@ -1033,25 +1101,18 @@ class Orchestrator:
 
     def _require_safe_worktree(self, session: Session, task: Task) -> None:
         worktree = Path(session.data["worktree"])
-        administrative = [
-            self.manifest_relative,
-            f"{task.task_dir}/plan.md",
-            f"{task.task_dir}/progress.md",
-            f"{task.task_dir}/review.md",
-        ]
+        actual_head = self.git.head(worktree)
+        if actual_head != session.data["baseSha"]:
+            raise ConfigError(
+                f"Task branch HEAD is {actual_head}; restore it to {session.data['baseSha']} "
+                "before retrying"
+            )
+        administrative = self._administrative_paths(task)
         self.git.assert_scope(
             self.git.changed_paths(worktree),
             [*task.allowed_paths, *administrative],
             "retry",
-            [
-                ".git/**",
-                ".ralph/**",
-                "references/**",
-                "**/AGENTS.md",
-                relative_path(self.config.root, self.config.prd_path),
-                task.raw.get("prd", relative_path(self.config.root, self.config.prd_path)),
-                f"{task.task_dir}/task.md",
-            ],
+            self._protected_paths(task),
         )
 
     def _active_command_task(self, task_id: str) -> Tuple[Session, Manifest, Task]:
@@ -1086,18 +1147,25 @@ class Orchestrator:
 
     def _complete(self, session: Session, manifest: Manifest, task: Task) -> None:
         worktree = Path(session.data["worktree"])
+        branch_head = self.git.head(worktree)
+        if branch_head != session.data["baseSha"]:
+            raise GitError(
+                f"Task branch HEAD is {branch_head}; expected unchanged base "
+                f"{session.data['baseSha']} before finalization"
+            )
         manifest.promote_dependencies()
         manifest.save()
-        administrative = [
-            self.manifest_relative,
-            f"{task.task_dir}/plan.md",
-            f"{task.task_dir}/progress.md",
-            f"{task.task_dir}/review.md",
-        ]
+        administrative = self._administrative_paths(task)
         changed = self.git.changed_paths(worktree)
-        self.git.assert_scope(changed, [*task.allowed_paths, *administrative], "finalizer")
+        self.git.assert_scope(
+            changed,
+            [*task.allowed_paths, *administrative],
+            "finalizer",
+            self._protected_paths(task),
+        )
         with self.ui.step("📦", "Creating an atomic task commit"):
             commit_sha = self.git.commit_all(worktree, f"{task.id}: {task.title}")
+            self._validate_task_commit(session, task, commit_sha, worktree)
             session.data["commitSha"] = commit_sha
             session.save()
             self.journal.record("commit_confirmed", taskId=task.id, commitSha=commit_sha)
@@ -1110,6 +1178,12 @@ class Orchestrator:
         commit_sha = session.data.get("commitSha")
         if not commit_sha:
             raise GitError("Cannot merge a session without a confirmed commit")
+        worktree = Path(session.data["worktree"])
+        if worktree.is_dir():
+            manifest = self._manifest_for_session(session)
+            self._validate_task_commit(
+                session, manifest.get(session.data["taskId"]), commit_sha, worktree
+            )
         with self.ui.step("🔗", f"Fast-forwarding {session.data['baseBranch']}"):
             merged_sha = self.git.fast_forward(
                 session.data["baseSha"], session.data["branch"], session.data["baseBranch"]
@@ -1122,6 +1196,42 @@ class Orchestrator:
                 "merge_confirmed", taskId=session.data["taskId"], commitSha=commit_sha
             )
         self._cleanup_session(session)
+
+    def _validate_task_commit(
+        self, session: Session, task: Task, commit_sha: str, worktree: Path
+    ) -> None:
+        commit_parent = self.git.commit_parent(commit_sha, worktree)
+        if commit_parent != session.data["baseSha"]:
+            raise GitError(
+                f"Final commit parent is {commit_parent}; expected {session.data['baseSha']}"
+            )
+        self.git.assert_scope(
+            self.git.committed_paths(session.data["baseSha"], commit_sha, worktree),
+            [*task.allowed_paths, *self._administrative_paths(task)],
+            "final commit",
+            self._protected_paths(task),
+        )
+
+    def _administrative_paths(self, task: Task) -> List[str]:
+        return [
+            self.manifest_relative,
+            f"{task.task_dir}/plan.md",
+            f"{task.task_dir}/progress.md",
+            f"{task.task_dir}/review.md",
+        ]
+
+    def _protected_paths(self, task: Task) -> List[str]:
+        configured_prd = relative_path(self.config.root, self.config.prd_path)
+        return [
+            ".git/**",
+            ".ralph/**",
+            "references/**",
+            "AGENTS.md",
+            "**/AGENTS.md",
+            configured_prd,
+            self._task_prd(task),
+            f"{task.task_dir}/task.md",
+        ]
 
     def _cleanup_session(self, session: Session) -> None:
         worktree = Path(session.data["worktree"])
@@ -1166,7 +1276,7 @@ class Orchestrator:
                 f"{task.id} stopped in state {task.status}; branch: {session.data['branch']}"
             )
             self.ui.info(f"Worktree for inspection: {session.data['worktree']}", "📁")
-            intervention = task.raw.get("intervention")
+            intervention = session.data.get("intervention")
             if intervention:
                 for action in intervention.get("nextActions", []):
                     self.ui.info("Next action: " + " ".join(action), "➡️ ")
@@ -1197,15 +1307,23 @@ class Orchestrator:
         )
 
     def _task_prd(self, task: Task) -> str:
-        return str(task.raw.get("prd", relative_path(self.config.root, self.config.prd_path)))
+        configured = relative_path(self.config.root, self.config.prd_path)
+        return task.effective_prd(configured)
 
     def _session_prd(self, session: Session) -> str:
         worktree = Path(session.data["worktree"])
         try:
-            manifest = Manifest.load(worktree / self.manifest_relative, worktree)
-            return self._task_prd(manifest.get(session.data["taskId"]))
+            root = worktree if worktree.is_dir() else self.config.root
+            manifest = Manifest.load(root / self.manifest_relative, root)
+            task = manifest.get(session.data["taskId"])
+            return str(task.raw.get("prd") or self._effective_session_prd(session))
         except (ConfigError, KeyError, OSError):
-            return relative_path(self.config.root, self.config.prd_path)
+            return self._effective_session_prd(session)
+
+    @staticmethod
+    def _effective_session_prd(session: Session) -> str:
+        value = session.data.get("effectivePrd", "")
+        return str(value)
 
     def _prd_position(self, manifest: Manifest, task: Task, prd: str) -> Tuple[int, int]:
         grouped = [item for item in manifest.tasks if self._task_prd(item) == prd]

@@ -6,8 +6,6 @@ import importlib.resources
 import json
 import shutil
 import subprocess
-import sys
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -36,11 +34,6 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--force", action="store_true", help="Overwrite Ralph templates")
 
     run = subcommands.add_parser("run", help="Run or resume the loop")
-    run.add_argument(
-        "--prd",
-        metavar="PATH",
-        help="Use this PRD for this run without changing .ralph/config.json",
-    )
     run.add_argument("--max-cycles", type=int)
     run.add_argument("--verbose", action="store_true")
     run.add_argument("--color", choices=("auto", "always", "never"))
@@ -59,13 +52,15 @@ def parser() -> argparse.ArgumentParser:
         choices=("planning", "implementation", "gates", "review", "final-gates"),
     )
     retry.add_argument("--attempts", required=True, type=int)
-    retry.add_argument("--prd", metavar="PATH")
+    retry.add_argument(
+        "--note",
+        help="Pass non-contract recovery context to the next role invocation",
+    )
     retry.add_argument("--color", choices=("auto", "always", "never"))
 
     extend = subcommands.add_parser("extend", help="Extend a task cycle budget")
     extend.add_argument("task_id")
     extend.add_argument("--cycles", required=True, type=int)
-    extend.add_argument("--prd", metavar="PATH")
     extend.add_argument("--color", choices=("auto", "always", "never"))
     return result
 
@@ -88,20 +83,16 @@ def main(arguments: Optional[List[str]] = None) -> int:
         if args.command == "run":
             if args.max_cycles is not None and args.max_cycles < 1:
                 raise ConfigError("--max-cycles must be positive")
-            if args.prd:
-                config = _with_prd_override(config, args.prd)
             return Orchestrator(config, ui).run(args.max_cycles)
         if args.command == "status":
             return _status(config, ui)
         if args.command == "doctor":
             return _doctor(config, ui)
         if args.command == "retry":
-            if args.prd:
-                config = _with_prd_override(config, args.prd)
-            return Orchestrator(config, ui).retry(args.task_id, args.stage, args.attempts)
+            return Orchestrator(config, ui).retry(
+                args.task_id, args.stage, args.attempts, args.note
+            )
         if args.command == "extend":
-            if args.prd:
-                config = _with_prd_override(config, args.prd)
             return Orchestrator(config, ui).extend(args.task_id, args.cycles)
     except (RalphError, OSError, ValueError, json.JSONDecodeError) as error:
         ui = locals().get("ui", UI(color="never"))
@@ -122,18 +113,6 @@ def _repository_root(cwd: Path) -> Path:
     if result.returncode != 0:
         raise ConfigError("Ralph must run inside a Git repository")
     return Path(result.stdout.strip()).resolve()
-
-
-def _with_prd_override(config: Config, value: str) -> Config:
-    supplied = Path(value)
-    prd_path = (supplied if supplied.is_absolute() else config.root / supplied).resolve()
-    try:
-        prd_path.relative_to(config.root)
-    except ValueError as error:
-        raise ConfigError("--prd must point inside the repository") from error
-    if not prd_path.is_file():
-        raise ConfigError(f"PRD not found: {prd_path}")
-    return replace(config, prd_path=prd_path)
 
 
 def _init(root: Path, manifest_value: str, prd_value: str, force: bool, ui: UI) -> int:
@@ -166,7 +145,7 @@ def _init(root: Path, manifest_value: str, prd_value: str, force: bool, ui: UI) 
             "# Product requirements document\n\nTODO: describe the module scope before adding tasks.\n",
             encoding="utf-8",
         )
-    ui.banner("RALPH LOOP v4", "initialization complete")
+    ui.banner(f"RALPH LOOP {__version__}", "initialization complete")
     ui.success(f"Configuration: {relative_path(root, config_path)}")
     ui.info(f"Manifest: {relative_path(root, manifest_path)}", "📋")
     ui.info(f"PRD: {relative_path(root, prd_path)}", "📝")
@@ -232,7 +211,11 @@ def _status(config: Config, ui: UI) -> int:
                 "ready": "🟢",
             }.get(task.status, "🔄")
             print(f"{icon} {task.id:<12} {task.status:<14} {task.title}")
-            intervention = task.raw.get("intervention")
+            intervention = (
+                session.get("intervention")
+                if session and task.id == session.get("taskId")
+                else None
+            )
             if intervention:
                 for action in intervention.get("nextActions", []):
                     print("   next: " + " ".join(action))
@@ -263,6 +246,8 @@ def _doctor(config: Config, ui: UI) -> int:
         ui.success("Repository has a base commit")
         git.ensure_identity()
         ui.success("Git commit author is configured")
+        git.ensure_branch_name(f"{config.git.branch_prefix}task")
+        ui.success("Git branch prefix is valid")
         git.ensure_clean()
         ui.success("Primary worktree is clean")
     except RalphError as error:

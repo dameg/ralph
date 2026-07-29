@@ -62,7 +62,6 @@ class UI:
     def iteration(
         self,
         current: int,
-        maximum: int,
         task_id: str,
         title: str,
         prd: Optional[str] = None,
@@ -212,7 +211,7 @@ class NullUI(UI):
     def prd_started(self, prd: str, current: int, total: int, resumed: bool = False) -> None:
         pass
 
-    def iteration(self, current: int, maximum: int, task_id: str, title: str, **kwargs: Any) -> None:
+    def iteration(self, current: int, task_id: str, title: str, **kwargs: Any) -> None:
         pass
 
     @contextmanager
