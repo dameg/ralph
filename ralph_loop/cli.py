@@ -217,6 +217,13 @@ def _status(config: Config, ui: UI) -> int:
                 else None
             )
             if intervention:
+                details = intervention.get("details") or {}
+                failure = details.get("error") or details.get("finalGateError")
+                if failure:
+                    print(f"   failure: {failure}")
+                review_failure = details.get("reviewFailure")
+                if isinstance(review_failure, dict):
+                    ui.review_failure(review_failure)
                 for action in intervention.get("nextActions", []):
                     print("   next: " + " ".join(action))
     counts = manifest.counts()

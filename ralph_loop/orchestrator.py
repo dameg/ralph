@@ -33,6 +33,13 @@ class RoleRun:
     sequence: int
 
 
+@dataclass(frozen=True)
+class GateOutcome:
+    status: str
+    error: Optional[str]
+    evidence: Optional[Dict[str, Any]] = None
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -548,6 +555,8 @@ class Orchestrator:
             "candidateDigest": digest,
             "gateStatus": None,
             "gateError": None,
+            "gateEvidence": None,
+            "passEligibility": None,
         }
         session.data["pendingReview"] = pending
         session.data["unconsumedRoleRun"] = None
@@ -567,9 +576,10 @@ class Orchestrator:
         outcome = self._call_gates(session, manifest, task, "gates")
         if outcome is None:
             return
-        status, error = outcome
-        pending["gateStatus"] = status
-        pending["gateError"] = error
+        pending["gateStatus"] = outcome.status
+        pending["gateError"] = outcome.error
+        pending["gateEvidence"] = outcome.evidence
+        self._ensure_review_pass_eligibility(session, task, pending)
         session.data["currentCycle"]["status"] = "review"
         self._set_status(session, manifest, task, "in_review")
 
@@ -588,6 +598,7 @@ class Orchestrator:
                 {"expected": pending["candidateDigest"], "actual": actual_digest},
             )
             return
+        eligibility = self._ensure_review_pass_eligibility(session, task, pending)
 
         def validate_review(result: Dict[str, Any]) -> None:
             previous_open = set((session.data.get("lastReview") or {}).get("openFindingIds", []))
@@ -597,19 +608,19 @@ class Orchestrator:
                 raise AgentContractError(
                     "Reviewer omitted previous findings: " + ", ".join(missing)
                 )
-            if result["status"] == "PASS" and (
-                pending["implementationStatus"] != "IMPLEMENTATION_COMPLETE"
-                or pending["gateStatus"] != "PASS"
-            ):
+            if result["status"] == "PASS" and not eligibility["eligible"]:
                 raise AgentContractError(
-                    "Reviewer cannot PASS an incomplete candidate or failed quality gates"
+                    "Reviewer cannot PASS this candidate: " + eligibility["reason"]
                 )
 
-        gate_context = (
-            "Quality gates passed."
-            if pending["gateStatus"] == "PASS"
-            else f"Quality gates failed: {pending['gateError']}. PASS is forbidden."
-        )
+        if eligibility["eligible"]:
+            gate_context = (
+                "Quality gates passed. Ralph marked this candidate eligible for PASS "
+                f"using {eligibility['basis']}. Independently verify every acceptance "
+                "criterion and finding before returning PASS."
+            )
+        else:
+            gate_context = f"PASS is forbidden: {eligibility['reason']}"
         run = self._call_role(
             session,
             manifest,
@@ -635,6 +646,10 @@ class Orchestrator:
             "candidateDigest": pending["candidateDigest"],
             "openFindingIds": open_ids,
             "status": result["status"],
+            "summary": result["summary"],
+            "findings": result["findings"],
+            "implementationStatus": pending["implementationStatus"],
+            "passEligibility": eligibility,
         }
         previous = session.data.get("lastReview") or {}
         stalled = bool(open_ids) and (
@@ -659,6 +674,7 @@ class Orchestrator:
                 status=result["status"],
                 candidateDigest=pending["candidateDigest"],
                 openFindingIds=open_ids,
+                passEligibilityBasis=eligibility["basis"],
             )
 
         if stalled:
@@ -718,8 +734,7 @@ class Orchestrator:
         outcome = self._call_gates(session, manifest, task, "final-gates")
         if outcome is None:
             return
-        status, error = outcome
-        if status == "PASS":
+        if outcome.status == "PASS":
             self._set_status(session, manifest, task, "completed")
             return
         session.data["currentCycle"] = None
@@ -734,7 +749,7 @@ class Orchestrator:
                 "cycle_budget_exhausted",
                 "implementation",
                 "needs_changes",
-                {"finalGateError": error},
+                {"finalGateError": outcome.error},
             )
 
     def _call_role(
@@ -932,13 +947,13 @@ class Orchestrator:
         manifest: Manifest,
         task: Task,
         stage: str,
-    ) -> Optional[Tuple[str, Optional[str]]]:
+    ) -> Optional[GateOutcome]:
         while True:
             try:
-                self._run_gates_once(session, task, stage)
+                evidence = self._run_gates_once(session, task, stage)
             except GateFailure as error:
                 self._reset_technical(session, stage)
-                return "FAIL", str(error)
+                return GateOutcome("FAIL", str(error))
             except GateInfrastructureError as error:
                 if not self._technical_failure(
                     session, manifest, task, stage, str(error), task.status
@@ -946,9 +961,11 @@ class Orchestrator:
                     return None
                 continue
             self._reset_technical(session, stage)
-            return "PASS", None
+            return GateOutcome("PASS", None, evidence)
 
-    def _run_gates_once(self, session: Session, task: Task, stage: str) -> None:
+    def _run_gates_once(
+        self, session: Session, task: Task, stage: str
+    ) -> Dict[str, Any]:
         worktree = Path(session.data["worktree"])
         before_head = self.git.head(worktree)
         if before_head != session.data["baseSha"]:
@@ -992,6 +1009,16 @@ class Orchestrator:
             if isinstance(caught, (GateFailure, GateInfrastructureError)):
                 raise caught
             raise GateInfrastructureError(f"Cannot run quality gates: {caught}") from caught
+        result_evidence = [
+            {
+                "name": item.name,
+                "command": item.command,
+                "exitCode": item.exit_code,
+                "elapsedSeconds": round(item.elapsed_seconds, 3),
+                "logPath": str(item.log_path),
+            }
+            for item in results
+        ]
         self.journal.record(
             "quality_gates_passed",
             taskId=task.id,
@@ -999,17 +1026,9 @@ class Orchestrator:
             stage=stage,
             sequence=sequence,
             elapsedSeconds=round(time.monotonic() - started, 3),
-            results=[
-                {
-                    "name": item.name,
-                    "command": item.command,
-                    "exitCode": item.exit_code,
-                    "elapsedSeconds": round(item.elapsed_seconds, 3),
-                    "logPath": str(item.log_path),
-                }
-                for item in results
-            ],
+            results=result_evidence,
         )
+        return {"stage": stage, "sequence": sequence, "results": result_evidence}
 
     def _technical_failure(
         self,
@@ -1068,11 +1087,16 @@ class Orchestrator:
             actions = [["ralph", "extend", task.id, "--cycles", "1"]]
         else:
             actions = [["ralph", "retry", task.id, "--stage", stage, "--attempts", "1"]]
+        intervention_details = dict(details or {})
+        if reason in {"cycle_budget_exhausted", "no_progress"}:
+            review_failure = self._review_failure_snapshot(session)
+            if review_failure:
+                intervention_details["reviewFailure"] = review_failure
         intervention = {
             "reason": reason,
             "stage": stage,
             "resumeStatus": resume_status,
-            "details": details or {},
+            "details": intervention_details,
             "nextActions": actions,
         }
         session.data["intervention"] = intervention
@@ -1082,6 +1106,27 @@ class Orchestrator:
         )
         self.ui.warning(f"{task.id} needs intervention: {reason}")
 
+    @staticmethod
+    def _review_failure_snapshot(session: Session) -> Optional[Dict[str, Any]]:
+        review = session.data.get("lastReview")
+        if not isinstance(review, dict) or review.get("status") == "PASS":
+            return None
+        findings = review.get("findings")
+        open_findings = (
+            [
+                dict(finding)
+                for finding in findings
+                if isinstance(finding, dict) and finding.get("status") == "open"
+            ]
+            if isinstance(findings, list)
+            else []
+        )
+        return {
+            "status": review.get("status"),
+            "summary": review.get("summary") or "Reviewer rejected the candidate",
+            "openFindings": open_findings,
+        }
+
     def _clear_intervention(self, session: Session) -> None:
         session.data["intervention"] = None
 
@@ -1090,6 +1135,101 @@ class Orchestrator:
         if not isinstance(pending, dict):
             raise ConfigError(f"{task.id} has no pending review obligation")
         return pending
+
+    def _ensure_review_pass_eligibility(
+        self,
+        session: Session,
+        task: Task,
+        pending: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        existing = pending.get("passEligibility")
+        gate_evidence = pending.get("gateEvidence")
+        existing_evidence = existing.get("evidence", {}) if isinstance(existing, dict) else {}
+        current_gate_sequence = (
+            gate_evidence.get("sequence") if isinstance(gate_evidence, dict) else None
+        )
+        if (
+            isinstance(existing, dict)
+            and isinstance(existing.get("eligible"), bool)
+            and existing_evidence.get("candidateDigest") == pending.get("candidateDigest")
+            and existing_evidence.get("gateStatus") == pending.get("gateStatus")
+            and existing_evidence.get("gateSequence") == current_gate_sequence
+        ):
+            return existing
+
+        if not isinstance(gate_evidence, dict):
+            gate_evidence = self._latest_gate_evidence(task.id, pending.get("gateStatus"))
+            pending["gateEvidence"] = gate_evidence
+
+        implementation_status = pending.get("implementationStatus")
+        gate_status = pending.get("gateStatus")
+        if gate_status != "PASS":
+            eligible = False
+            basis = "QUALITY_GATES_NOT_PASSED"
+            reason = pending.get("gateError") or "deterministic quality gates did not pass"
+        elif implementation_status == "IMPLEMENTATION_COMPLETE":
+            eligible = True
+            basis = "IMPLEMENTER_COMPLETE_AND_GATES_PASSED"
+            reason = "implementer reported completion and deterministic quality gates passed"
+        elif implementation_status == "VERIFICATION_FAILED":
+            eligible = True
+            basis = "DETERMINISTIC_GATES_SUPERSEDE_VERIFICATION_FAILURE"
+            reason = (
+                "the unchanged candidate passed Ralph's deterministic quality gates after "
+                "the implementer reported a verification failure"
+            )
+        else:
+            eligible = False
+            basis = "IMPLEMENTATION_NOT_COMPLETE"
+            reason = f"implementer reported {implementation_status or 'an unknown status'}"
+
+        eligibility = {
+            "eligible": eligible,
+            "basis": basis,
+            "reason": reason,
+            "evidence": {
+                "candidateDigest": pending.get("candidateDigest"),
+                "gateStatus": gate_status,
+                "gateSequence": gate_evidence.get("sequence") if gate_evidence else None,
+                "gateResults": gate_evidence.get("results", []) if gate_evidence else [],
+            },
+        }
+        pending["passEligibility"] = eligibility
+        self.journal.record(
+            "review_pass_eligibility_resolved",
+            taskId=task.id,
+            cycleId=pending.get("cycleId"),
+            implementationRunId=pending.get("implementationRunId"),
+            implementationStatus=implementation_status,
+            candidateDigest=pending.get("candidateDigest"),
+            gateStatus=gate_status,
+            eligible=eligible,
+            basis=basis,
+            reason=reason,
+            evidence=eligibility["evidence"],
+        )
+        session.save()
+        return eligibility
+
+    def _latest_gate_evidence(
+        self, task_id: str, gate_status: Any
+    ) -> Optional[Dict[str, Any]]:
+        expected_event = (
+            "quality_gates_passed" if gate_status == "PASS" else "quality_gates_failed"
+        )
+        for entry in reversed(self.journal.entries()):
+            if (
+                entry.get("event") == expected_event
+                and entry.get("taskId") == task_id
+                and entry.get("stage") == "gates"
+            ):
+                return {
+                    "stage": "gates",
+                    "sequence": entry.get("sequence"),
+                    "results": entry.get("results", []),
+                    "error": entry.get("error"),
+                }
+        return None
 
     def _candidate_digest(self, session: Session, task: Task) -> str:
         return self.git.candidate_digest(Path(session.data["worktree"]), task.allowed_paths)
@@ -1278,6 +1418,13 @@ class Orchestrator:
             self.ui.info(f"Worktree for inspection: {session.data['worktree']}", "📁")
             intervention = session.data.get("intervention")
             if intervention:
+                details = intervention.get("details") or {}
+                failure = details.get("error") or details.get("finalGateError")
+                if failure:
+                    self.ui.info(f"Failure: {failure}", "❌")
+                review_failure = details.get("reviewFailure")
+                if isinstance(review_failure, dict):
+                    self.ui.review_failure(review_failure)
                 for action in intervention.get("nextActions", []):
                     self.ui.info("Next action: " + " ".join(action), "➡️ ")
         else:

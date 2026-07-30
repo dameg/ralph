@@ -55,6 +55,27 @@ class UI:
         if self.verbose:
             print(f"   {self.paint(message, 'dim')}")
 
+    def review_failure(self, review: Mapping[str, Any]) -> None:
+        status = str(review.get("status") or "FAIL")
+        summary = str(review.get("summary") or "Reviewer rejected the candidate")
+        print()
+        print(f"🔍 {self.paint(f'Review {status}: {summary}', 'yellow')}")
+        findings = review.get("openFindings")
+        if not isinstance(findings, list) or not findings:
+            return
+        print("   Open findings:")
+        for finding in findings:
+            if not isinstance(finding, Mapping):
+                continue
+            finding_id = finding.get("id", "REV-?")
+            severity = str(finding.get("severity", "unknown")).upper()
+            location = finding.get("file") or "unknown file"
+            print(f"   • {finding_id} [{severity}] {location}")
+            print(f"     {finding.get('description', 'No description provided')}")
+            expected = finding.get("expectedBehavior")
+            if expected:
+                print(f"     Expected: {expected}")
+
     def prd_started(self, prd: str, current: int, total: int, resumed: bool = False) -> None:
         action = "Resuming" if resumed else "Starting"
         self.info(f"{action} PRD: {prd} · {current}/{total} tasks", "📚")
@@ -206,6 +227,9 @@ class NullUI(UI):
         pass
 
     def detail(self, message: str) -> None:
+        pass
+
+    def review_failure(self, review: Mapping[str, Any]) -> None:
         pass
 
     def prd_started(self, prd: str, current: int, total: int, resumed: bool = False) -> None:

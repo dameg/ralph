@@ -28,6 +28,12 @@ candidates whose deterministic quality gates fail. A cycle cannot be abandoned
 because a separate review budget ran out: review has no independent business
 limit.
 
+An unchanged `VERIFICATION_FAILED` candidate becomes eligible for reviewer
+`PASS` when Ralph's deterministic quality gates pass. Ralph preserves the
+implementer's original status and records the derived eligibility reason,
+candidate digest, gate sequence, and gate-log evidence in session state and the
+append-only journal. `IN_PROGRESS` and failed quality gates remain ineligible.
+
 Each task runs on an isolated branch in a separate Git worktree. The primary
 branch moves only after reviewer `PASS`, successful final gates, and a confirmed
 commit. Runtime state, results, logs, lineage, and the append-only journal live
@@ -321,8 +327,9 @@ consumes a cycle and records a `pendingReview` containing:
 
 Review can close that obligation only with a valid `PASS`, `FAIL`, or
 `NEEDS_REPLAN` for the same candidate digest. `PASS` is forbidden unless the
-implementation is complete, all acceptance evidence passes, gates pass, and no
-finding remains open.
+implementation is complete or a `VERIFICATION_FAILED` result has been
+superseded by passing deterministic gates, all acceptance evidence passes,
+gates pass, and no finding remains open. Final gates run again before commit.
 
 Lineage records which review led to an implementation and which subsequent
 review evaluated it. Existing `REV-*` findings must remain present as `open` or
@@ -346,6 +353,11 @@ Both require an active task in `needs_intervention`, validate the requested
 stage, and append an audit event to the journal. An optional `--note` is passed
 once to the next role invocation as recovery context; it does not change the
 task contract.
+
+When a failed review exhausts the available cycles or triggers `no_progress`,
+the run summary and `ralph status` print the reviewer summary plus every open
+`REV-*` finding with its severity, file, description, and expected behavior.
+The same actionable snapshot is retained in the intervention details.
 
 Scope violations and externally changed candidates must be repaired manually in
 the preserved worktree before retry is accepted.

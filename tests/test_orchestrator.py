@@ -419,6 +419,7 @@ class OrchestratorTests(unittest.TestCase):
                 elif role == "reviewer":
                     self.reviews += 1
                     payload["status"] = "FAIL"
+                    payload["summary"] = "Value does not satisfy the acceptance criterion"
                     payload["acceptanceCriteria"][0]["status"] = "FAIL"
                     payload["findings"] = [{
                         "id": "REV-001", "severity": "high", "file": "src/value.txt",
@@ -433,14 +434,138 @@ class OrchestratorTests(unittest.TestCase):
         repo = Repo(task)
         self.addCleanup(repo.close)
         agent = FailedCandidateAgent()
-        result = Orchestrator(repo.config, NullUI(), agent=agent).run()
+        from ralph_loop.ui import UI
+
+        output = StringIO()
+        with redirect_stdout(output):
+            result = Orchestrator(
+                repo.config, UI(color="never"), agent=agent
+            ).run()
         self.assertEqual(result, 3)
         self.assertEqual(agent.reviews, 1)
+        rendered = output.getvalue()
+        self.assertIn(
+            "Review FAIL: Value does not satisfy the acceptance criterion", rendered
+        )
+        self.assertIn("REV-001 [HIGH] src/value.txt", rendered)
+        self.assertIn("Wrong value", rendered)
+        self.assertIn("Expected: Value is ok", rendered)
         _, state, current = active_task(repo)
         self.assertEqual(state["cyclesUsed"], 1)
         self.assertIsNone(state["pendingReview"])
         self.assertEqual(current.status, "needs_intervention")
         self.assertEqual(state["intervention"]["reason"], "cycle_budget_exhausted")
+        review_failure = state["intervention"]["details"]["reviewFailure"]
+        self.assertEqual(review_failure["status"], "FAIL")
+        self.assertEqual(review_failure["openFindings"][0]["id"], "REV-001")
+
+    def test_passing_gates_make_verification_failed_candidate_eligible_for_pass(self):
+        class VerificationUnavailableAgent(SuccessfulAgent):
+            def run(self, role, task, root, result_path, log_path, context="", invocation=1):
+                payload = super().run(
+                    role, task, root, result_path, log_path, context, invocation
+                )
+                if role == "implementer":
+                    payload["status"] = "VERIFICATION_FAILED"
+                    payload["summary"] = "Implementation finished; local container unavailable"
+                    result_path.write_text(json.dumps(payload), encoding="utf-8")
+                return payload
+
+        repo = Repo()
+        self.addCleanup(repo.close)
+
+        result = Orchestrator(
+            repo.config, NullUI(), agent=VerificationUnavailableAgent()
+        ).run()
+
+        self.assertEqual(result, 0)
+        state_path = next((repo.root / ".ralph/runtime/sessions").glob("*/state.json"))
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        eligibility = state["lastReview"]["passEligibility"]
+        self.assertTrue(eligibility["eligible"])
+        self.assertEqual(
+            eligibility["basis"],
+            "DETERMINISTIC_GATES_SUPERSEDE_VERIFICATION_FAILURE",
+        )
+        self.assertEqual(
+            eligibility["evidence"]["candidateDigest"],
+            state["currentCycle"]["candidateDigest"],
+        )
+        self.assertTrue(eligibility["evidence"]["gateResults"])
+        implementation_result = next(
+            (state_path.parent / "results").glob("*-implementer.json")
+        )
+        self.assertEqual(
+            json.loads(implementation_result.read_text(encoding="utf-8"))["status"],
+            "VERIFICATION_FAILED",
+        )
+        events = Journal(repo.config.runtime_path).entries()
+        resolution = next(
+            item for item in events if item["event"] == "review_pass_eligibility_resolved"
+        )
+        self.assertEqual(resolution["implementationStatus"], "VERIFICATION_FAILED")
+        self.assertTrue(resolution["evidence"]["gateResults"])
+
+    def test_in_progress_candidate_remains_ineligible_after_passing_gates(self):
+        class InProgressAgent(SuccessfulAgent):
+            def __init__(self):
+                self.reviews = 0
+
+            def run(self, role, task, root, result_path, log_path, context="", invocation=1):
+                payload = super().run(
+                    role, task, root, result_path, log_path, context, invocation
+                )
+                if role == "implementer":
+                    payload["status"] = "IN_PROGRESS"
+                    result_path.write_text(json.dumps(payload), encoding="utf-8")
+                elif role == "reviewer":
+                    self.reviews += 1
+                return payload
+
+        repo = Repo()
+        self.addCleanup(repo.close)
+        agent = InProgressAgent()
+
+        self.assertEqual(Orchestrator(repo.config, NullUI(), agent=agent).run(), 3)
+
+        self.assertEqual(agent.reviews, 4)
+        _, state, task = active_task(repo)
+        self.assertEqual(task.status, "needs_intervention")
+        self.assertEqual(state["intervention"]["stage"], "review")
+        eligibility = state["pendingReview"]["passEligibility"]
+        self.assertFalse(eligibility["eligible"])
+        self.assertEqual(eligibility["basis"], "IMPLEMENTATION_NOT_COMPLETE")
+
+    def test_existing_pending_review_reconstructs_eligibility_from_gate_journal(self):
+        class VerificationUnavailableAgent(SuccessfulAgent):
+            def run(self, role, task, root, result_path, log_path, context="", invocation=1):
+                payload = super().run(
+                    role, task, root, result_path, log_path, context, invocation
+                )
+                if role == "implementer":
+                    payload["status"] = "VERIFICATION_FAILED"
+                    result_path.write_text(json.dumps(payload), encoding="utf-8")
+                return payload
+
+        repo = Repo()
+        self.addCleanup(repo.close)
+        agent = VerificationUnavailableAgent()
+        orchestrator, session, _, _ = self.prepare_active_cycle(
+            repo, agent, through_gates=True
+        )
+        pending = session.data["pendingReview"]
+        pending.pop("passEligibility")
+        pending.pop("gateEvidence")
+        session.save()
+
+        self.assertEqual(orchestrator.run(), 0)
+
+        state_path = next((repo.root / ".ralph/runtime/sessions").glob("*/state.json"))
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        eligibility = state["lastReview"]["passEligibility"]
+        self.assertTrue(eligibility["eligible"])
+        self.assertIsNotNone(eligibility["evidence"]["gateSequence"])
+        self.assertTrue(eligibility["evidence"]["gateResults"])
 
     def test_reviewer_pass_for_failed_candidate_is_retried_then_intervenes(self):
         class InvalidPassAgent(SuccessfulAgent):
