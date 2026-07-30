@@ -59,26 +59,66 @@ Other contract versions are rejected rather than migrated.
 Requirements: Python 3.9+, Git, and an authenticated Codex CLI.
 
 ```bash
-./ralph init --prd docs/my-module-prd.md \
+curl -fsSL https://github.com/dameg/ralph/releases/latest/download/install.sh | sh
+
+cd /path/to/your/git-repository
+ralph init --prd docs/my-module-prd.md \
   --manifest docs/tasks/my-module/manifest.json
 
 # Complete and commit the PRD, manifest, and task.md files.
-./ralph doctor
-./ralph status
-./ralph run
+ralph doctor
+ralph status
+ralph run
 ```
 
-Installing a system-wide command is optional:
+The installer places one self-contained executable at `~/.local/bin/ralph` and
+never uses `sudo`, `pip`, or a virtual environment. If that directory is not in
+`PATH`, follow the command printed by the installer. Select a release or install
+into another directory with:
 
 ```bash
-python3 -m pip install -e .
-ralph run
+curl -fsSL https://github.com/dameg/ralph/releases/download/v1.0.0/install.sh \
+  | sh -s -- --version 1.0.0
+curl -fsSL https://github.com/dameg/ralph/releases/latest/download/install.sh \
+  | sh -s -- --bin-dir "$HOME/bin"
+```
+
+Only the program is installed globally. Configuration, prompts, session state,
+logs, and isolated worktrees remain project-local under `<repository>/.ralph/`;
+runtime data is written to `<repository>/.ralph/runtime/` and ignored by Git.
+
+To work from a source checkout instead, keep using the repository-local
+`./ralph` wrapper or run `python3 -m pip install -e .`.
+
+### Updating and uninstalling
+
+Update to the latest stable release from any directory:
+
+```bash
+ralph update
+ralph update --check
+ralph update --version 1.1.0
+```
+
+Downgrades are rejected unless explicitly requested with `--force`. Updates are
+downloaded beside the installed executable, verified against the release SHA-256
+checksum and version output, then replaced atomically. A failed update leaves
+the installed version unchanged. Source checkouts cannot update themselves;
+use Git or reinstall the release artifact instead.
+
+Uninstalling removes only the executable and preserves every project's `.ralph`
+directory:
+
+```bash
+curl -fsSL https://github.com/dameg/ralph/releases/latest/download/install.sh \
+  | sh -s -- --uninstall
 ```
 
 ## CLI reference
 
 Run `ralph` after installation or use the repository-local `./ralph` wrapper.
-Every command must run from inside the target Git repository.
+Operational commands must run inside the target Git repository; `update`,
+`--help`, and `--version` work globally.
 
 | Command | Purpose |
 | --- | --- |
@@ -88,12 +128,14 @@ Every command must run from inside the target Git repository.
 | `ralph run` | Start or safely resume the planner/implementer/reviewer loop. |
 | `ralph retry` | Grant more role invocations after an intervention. |
 | `ralph extend` | Grant more task cycles after budget exhaustion or no progress. |
+| `ralph update` | Check for or install a stable Ralph release. |
 
 Global discovery commands:
 
 ```bash
 ralph --help
 ralph --version
+ralph update --help
 ralph run --help
 ```
 

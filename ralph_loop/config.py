@@ -88,7 +88,7 @@ class Config:
         config_path = (path or root / ".ralph" / "config.json").resolve()
         if not config_path.is_file():
             raise ConfigError(
-                f"Configuration not found: {config_path}. Run `./ralph init` first."
+                f"Configuration not found: {config_path}. Run `ralph init` first."
             )
         try:
             with config_path.open("r", encoding="utf-8") as handle:

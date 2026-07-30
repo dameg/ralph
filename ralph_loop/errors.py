@@ -42,5 +42,9 @@ class RuntimeBusyError(RalphError):
     """Another Ralph process owns the runtime lock."""
 
 
+class UpdateError(RalphError):
+    """Ralph could not safely check for or install an update."""
+
+
 class RalphInternalError(RalphError):
     """Ralph hit an unexpected internal workflow error."""
