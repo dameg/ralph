@@ -17,6 +17,7 @@ from .journal import Session
 from .manifest import Manifest, blank_manifest
 from .orchestrator import Orchestrator
 from .ui import UI
+from .updater import perform_update, version_key
 from .util import atomic_write_json, relative_path
 
 
@@ -27,6 +28,16 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--version", action="version", version=f"ralph {__version__}")
     subcommands = result.add_subparsers(dest="command", required=True)
+
+    update = subcommands.add_parser("update", help="Check for or install a Ralph update")
+    selection = update.add_mutually_exclusive_group()
+    selection.add_argument("--check", action="store_true", help="Check without installing")
+    selection.add_argument("--version", help="Install a stable MAJOR.MINOR.PATCH release")
+    update.add_argument(
+        "--force",
+        action="store_true",
+        help="Reinstall the current version or permit a downgrade",
+    )
 
     init = subcommands.add_parser("init", help="Create configuration and templates")
     init.add_argument("--manifest", default="docs/tasks/manifest.json")
@@ -67,6 +78,35 @@ def parser() -> argparse.ArgumentParser:
 
 def main(arguments: Optional[List[str]] = None) -> int:
     args = parser().parse_args(arguments)
+    if args.command == "update":
+        ui = UI()
+        try:
+            if args.check and args.force:
+                raise ConfigError("--check cannot be combined with --force")
+            result = perform_update(
+                check_only=args.check,
+                requested_version=args.version,
+                force=args.force,
+            )
+            if result.check_only:
+                if version_key(result.target) > version_key(result.current):
+                    ui.info(
+                        f"Update available: Ralph {result.current} → {result.target}", "⬆️ "
+                    )
+                elif result.target == result.current:
+                    ui.success(f"Ralph {result.current} is up to date")
+                else:
+                    ui.info(
+                        f"Installed Ralph {result.current} is newer than {result.target}", "ℹ️ "
+                    )
+            elif result.changed:
+                ui.success(f"Updated Ralph {result.current} → {result.target}")
+            else:
+                ui.success(f"Ralph {result.current} is already up to date")
+            return 0
+        except (RalphError, OSError, ValueError) as error:
+            ui.error(str(error))
+            return 1
     root = _repository_root(Path.cwd())
     if args.command == "init":
         ui = UI()

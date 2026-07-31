@@ -58,3 +58,25 @@ jobs:
 
       - name: Verify CLI
         run: ./ralph --version
+
+  distribution:
+    name: Distribution (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.9"
+
+      - name: Test zipapp, installer, and updater
+        run: python -m unittest tests.test_distribution -v
